@@ -867,3 +867,71 @@ a:hover { text-decoration: underline; }
   .modal-card { max-height: 100vh; border-radius: 0; }
   .toast { left: 16px; right: 16px; bottom: 16px; max-width: none; }
 }
+
+/* ==========================================================================
+   Collapsible tables (Business, Spend, Impressions, Influencer metric cards)
+   ========================================================================== */
+.tbl-collapse {
+  margin-top: 14px;
+}
+.tbl-collapse-summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--brand-muted);
+  border: 1px solid var(--brand-border);
+  background: transparent;
+  user-select: none;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  width: fit-content;
+}
+.tbl-collapse-summary::-webkit-details-marker { display: none; }
+.tbl-collapse-summary::marker { content: ""; }
+.tbl-collapse-summary:hover {
+  background: var(--brand-accent);
+  color: var(--brand-deep);
+}
+.tbl-collapse-chev {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  font-size: 0.9em;
+  color: var(--brand-muted-2);
+}
+.tbl-collapse[open] .tbl-collapse-chev {
+  transform: rotate(90deg);
+}
+.tbl-collapse[open] > .tbl-wrap {
+  margin-top: 10px;
+}
+.tbl-collapse > .tbl-wrap {
+  margin: 0;
+}
+
+/* "Show all tables / Hide all tables" toggle button — sits in the filter bar */
+.fl-tbl-toggle {
+  padding: 8px 14px;
+  background: transparent;
+  border: 1px solid var(--brand-border);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--brand-muted);
+  cursor: pointer;
+  align-self: flex-end;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+  margin-left: auto;
+}
+.fl-tbl-toggle:hover {
+  background: var(--brand-accent);
+  color: var(--brand-deep);
+}
+@media (max-width: 768px) {
+  .fl-tbl-toggle { min-height: 44px; align-self: stretch; margin-left: 0; }
+}
