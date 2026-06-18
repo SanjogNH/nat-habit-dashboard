@@ -21,7 +21,7 @@ import { State } from "./dashboard.js";
 import { createDateRange, createMultiSelect, createSegmented } from "./filters.js";
 import { renderLineChart, destroyChart, PALETTE } from "./charts.js";
 import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
-import { escapeHtml, fmtInt, pctChange, toast } from "./util.js";
+import { escapeHtml, fmtInt, pctChange, toast , makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
 import {
   pluralize, deltaPill, tsForFilename,
 } from "./aggregate.js";
@@ -163,6 +163,9 @@ function buildSkeleton(root) {
       downloadMetric(btn.dataset.metric, btn.dataset.dl);
     });
   });
+
+  // Collapse all per-period and per-SKU tables by default.
+  root.querySelectorAll(".section-card > .tbl-wrap").forEach(el => makeTableCollapsible(el));
 }
 
 /* ---------------------------------------------------------------- *
@@ -234,6 +237,12 @@ function buildFilters() {
     allowAll: true,
   });
   bar.appendChild(subF.el);
+
+  const toggleBtn = document.createElement("button");
+  toggleBtn.className = "fl-tbl-toggle";
+  toggleBtn.textContent = "Show all tables";
+  bar.appendChild(toggleBtn);
+  wireTableToggleAll(toggleBtn, document.getElementById("content-impressions"));
 
   LocalState.filters = { dateF, platsF, brandedF, catsF, subF };
 
@@ -448,6 +457,7 @@ function rerender() {
   for (const m of KW_METRICS) renderKeywordPanel(m, aggKw);
   renderSkuPicker(aggSku);
   renderSkuPanel(aggSku);
+  syncTableCollapseLabels(document.getElementById("content-impressions"));
 }
 
 function renderKeywordPanel(metric, agg) {
