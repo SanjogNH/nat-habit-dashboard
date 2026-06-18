@@ -12,7 +12,7 @@ import { State } from "./dashboard.js";
 import { createDateRange, createSegmented, createMultiSelect } from "./filters.js";
 import { renderLineChart, destroyChart, PALETTE } from "./charts.js";
 import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
-import { escapeHtml, fmtINR, fmtROAS, pctChange, toast } from "./util.js";
+import { escapeHtml, fmtINR, fmtROAS, pctChange, toast , makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
 import {
   bucketKey, enumeratePeriods, pluralize, deltaPill, tsForFilename,
 } from "./aggregate.js";
@@ -120,6 +120,9 @@ function buildSkeleton(root) {
       downloadMetric(btn.dataset.metric, btn.dataset.dl);
     });
   });
+
+  // Collapse all per-period breakdown tables by default.
+  root.querySelectorAll(".section-card > .tbl-wrap").forEach(el => makeTableCollapsible(el));
 }
 
 /* ---------------------------------------------------------------- *
@@ -189,6 +192,12 @@ function buildFilters() {
   `;
   bar.appendChild(dimWrap);
 
+  const toggleBtn = document.createElement("button");
+  toggleBtn.className = "fl-tbl-toggle";
+  toggleBtn.textContent = "Show all tables";
+  bar.appendChild(toggleBtn);
+  wireTableToggleAll(toggleBtn, document.getElementById("content-spend"));
+
   LocalState.filters = { dateF, granF, platsF, levelF };
 
   syncFromFilters();
@@ -219,6 +228,7 @@ function rerender() {
   const agg = computeAggregations();
   LocalState._agg = agg;
   for (const m of METRICS) renderMetricPanel(m, agg);
+  syncTableCollapseLabels(document.getElementById("content-spend"));
 }
 
 function refreshDimensionDropdown() {
