@@ -28,9 +28,30 @@ from calculate import build_payload
 from fetch_data import fetch_all, summarise
 
 
+def _json_default(o: Any) -> Any:
+    """Fallback for json.dumps when it encounters a non-serializable object.
+
+    Most commonly this catches pandas NAType / NaT / numpy.nan that survive
+    normalization — coerce all of these to None so they serialize as JSON null.
+    """
+    try:
+        import pandas as pd
+        if pd.isna(o):
+            return None
+    except (TypeError, ValueError, ImportError):
+        pass
+    # Numpy scalars: unwrap to native Python types.
+    if hasattr(o, "item") and callable(o.item):
+        try:
+            return o.item()
+        except (TypeError, ValueError):
+            pass
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
 def _write_json(path: str, obj: Any) -> int:
     """Write obj as JSON; return byte count written."""
-    body = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    body = json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=_json_default)
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
     return len(body.encode("utf-8"))
@@ -43,7 +64,7 @@ def _maybe_split(payload: dict, out_dir: str) -> tuple[dict, list[str]]:
     The shell_payload replaces the moved arrays with {"_external": "<file>"}
     sentinels so the frontend knows where to fetch them.
     """
-    full_bytes = len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    full_bytes = len(json.dumps(payload, separators=(",", ":"), default=_json_default).encode("utf-8"))
     if full_bytes <= SPLIT_THRESHOLD_BYTES:
         return payload, []
 
@@ -63,7 +84,7 @@ def _maybe_split(payload: dict, out_dir: str) -> tuple[dict, list[str]]:
         shell[key] = {"_external": f"{key}.json", "count": len(payload[key])}
         moved.append(f"{key}.json")
         # Recalc shell size.
-        current_bytes = len(json.dumps(shell, separators=(",", ":")).encode("utf-8"))
+        current_bytes = len(json.dumps(shell, separators=(",", ":"), default=_json_default).encode("utf-8"))
 
     shell.setdefault("metadata", {})["split_files"] = moved
     return shell, moved
