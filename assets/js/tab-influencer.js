@@ -29,7 +29,7 @@ import { State, loadTab } from "./dashboard.js";
 import { createDateRange, createMultiSelect } from "./filters.js";
 import { renderLineChart, destroyChart, PALETTE } from "./charts.js";
 import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
-import { escapeHtml, fmtInt, fmtINR, pctChange, toast } from "./util.js";
+import { escapeHtml, fmtInt, fmtINR, pctChange, toast , makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
 import {
   enumeratePeriods, pluralize, deltaPill, tsForFilename,
   lastIndexWithData, findPrevWithData,
@@ -182,6 +182,11 @@ function buildSkeleton(root) {
       downloadMetric(btn.dataset.metric, btn.dataset.dl);
     });
   });
+
+  // Collapse the 4 campaign-metric tables by default; keep the campaign-list
+  // table always visible since it's the headline content of the tab.
+  root.querySelectorAll('.section-card:not([data-metric="campaign-list"]) > .tbl-wrap')
+      .forEach(el => makeTableCollapsible(el));
 }
 
 /* ---------------------------------------------------------------- *
@@ -250,6 +255,12 @@ function buildFilters() {
     searchable: true,
   });
   bar.appendChild(adF.el);
+
+  const toggleBtn = document.createElement("button");
+  toggleBtn.className = "fl-tbl-toggle";
+  toggleBtn.textContent = "Show all tables";
+  bar.appendChild(toggleBtn);
+  wireTableToggleAll(toggleBtn, document.getElementById("content-influencer"));
 
   LocalState.filters = { dateF, catsF, infF, adF };
   syncFromFilters();
@@ -334,6 +345,8 @@ function rerender() {
   LocalState._aggOverlay = overlay;
   renderOverlayImpressions(overlay);
   renderOverlaySearch(overlay);
+
+  syncTableCollapseLabels(document.getElementById("content-influencer"));
 }
 
 /** Subset of influencer rows passing date + category + influencer + campaign filters. */
