@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 56" role="img" aria-label="Nat Habit — Breathe Life">
+  <style>
+    .wm-name { font-family: 'Nunito', system-ui, sans-serif; font-weight: 800; font-size: 26px; letter-spacing: -0.01em; fill: #1F2A22; }
+    .wm-tag  { font-family: 'Nunito', system-ui, sans-serif; font-weight: 700; font-size: 8.5px; letter-spacing: 0.32em; fill: #BD5A35; }
+    .wm-dot  { fill: #BD5A35; }
+  </style>
+  <text class="wm-name" x="0" y="28">nat habit</text>
+  <circle class="wm-dot" cx="130" cy="24" r="2.4"/>
+  <text class="wm-tag" x="0" y="46">BREATHE LIFE</text>
+</svg>

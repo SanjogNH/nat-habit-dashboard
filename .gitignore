@@ -1,0 +1,37 @@
+# Smoke-test artifacts (re-generated per run; never committed)
+smoke-*.png
+smoke-*.html
+smoke-*.txt
+
+# Local vendor copies of CDN libs (only used by smoke_test.py in sandboxed
+# environments that block cdn.jsdelivr.net). Production HTML uses the CDN
+# refs directly — keep these out of the repo.
+assets/vendor/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment overrides
+.env
+.env.local
+
+# Tooling output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts (kept locally for testing — never the source of truth)
+*.tgz

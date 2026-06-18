@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Nat Habit Analytics</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/dashboard.css">
+<!-- Chart.js for visualisations, SheetJS for Excel downloads. CDN per spec. -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+</head>
+<body class="dash-page">
+
+<header class="topbar" role="banner">
+  <a href="dashboard.html" class="brand-link" aria-label="Nat Habit Analytics — home">
+    <img src="assets/img/logo.svg" alt="Nat Habit" class="brand-mark" width="160" height="44">
+  </a>
+
+  <nav class="primary-tabs" id="primary-tabs" role="tablist" aria-label="Dashboard sections">
+    <button class="tab is-active" role="tab" aria-selected="true" data-tab="search">Search Movement</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="impressions">Impressions &amp; Brand Share</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="business">Business</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="spend">Spend</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="influencer">Influencer</button>
+  </nav>
+
+  <div class="topbar-right">
+    <span id="last-updated" class="last-updated" title="Last refresh of dashboard data">—</span>
+    <button id="refresh-btn" class="ghost-btn" type="button" title="Pull latest data live from the sheet">
+      <span class="refresh-icon" aria-hidden="true">↻</span>
+      <span class="refresh-label">Refresh</span>
+    </button>
+    <button id="logout-btn" class="ghost-btn ghost-btn--quiet" type="button" title="Sign out">Sign out</button>
+  </div>
+
+  <button id="hamburger" class="hamburger" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="primary-tabs">
+    <span></span><span></span><span></span>
+  </button>
+</header>
+
+<!-- Mobile-only menu drawer; opens the same tab buttons in vertical form -->
+<div id="mobile-menu" class="mobile-menu" hidden>
+  <div class="m-status" id="last-updated-m">—</div>
+  <div class="m-tab-sep"></div>
+  <button class="m-tab is-active" data-tab="search">Search Movement</button>
+  <button class="m-tab" data-tab="impressions">Impressions &amp; Brand Share</button>
+  <button class="m-tab" data-tab="business">Business</button>
+  <button class="m-tab" data-tab="spend">Spend</button>
+  <button class="m-tab" data-tab="influencer">Influencer</button>
+  <div class="m-tab-sep"></div>
+  <button id="refresh-btn-m" class="m-tab m-tab--quiet">↻ Refresh data</button>
+  <button id="logout-btn-m" class="m-tab m-tab--quiet">Sign out</button>
+</div>
+
+<!-- Boot states: loading / error / ready -->
+<section id="boot-loading" class="boot-state" aria-live="polite">
+  <div class="boot-spinner" aria-hidden="true"></div>
+  <p class="boot-msg">Loading dashboard data…</p>
+</section>
+
+<section id="boot-error" class="boot-state" hidden>
+  <p class="boot-err-title">Couldn't load the dashboard data.</p>
+  <p id="boot-err-msg" class="boot-err-msg"></p>
+  <button id="boot-retry" class="primary-btn">Try again</button>
+</section>
+
+<main id="main" class="main" hidden>
+
+  <!-- ============ TAB: SEARCH MOVEMENT ============ -->
+  <section id="tab-search" class="tab-panel is-active" role="tabpanel" aria-labelledby="tab-search">
+    <header class="panel-head">
+      <h1 class="panel-h1">Search Movement</h1>
+      <p class="panel-sub">Keyword rank (Amazon) or search volume (other platforms) across days and weeks.</p>
+    </header>
+    <div id="filters-search" class="filter-bar" aria-label="Search Movement filters">
+      <!-- Filter bar populated by JS in Milestone 3 -->
+    </div>
+    <div id="content-search" class="tab-content">
+      <div class="placeholder-card">
+        <p class="placeholder-title">Data pipe is connected.</p>
+        <p id="search-readback" class="placeholder-body">—</p>
+        <p class="placeholder-hint">Full Search Movement panels arrive in the next milestone.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TAB: IMPRESSIONS ============ -->
+  <section id="tab-impressions" class="tab-panel" role="tabpanel" hidden>
+    <header class="panel-head">
+      <h1 class="panel-h1">Impressions &amp; Brand Share</h1>
+      <p class="panel-sub">Weekly impression and click share, at keyword and SKU level.</p>
+    </header>
+    <div id="filters-impressions" class="filter-bar" aria-label="Impressions filters"></div>
+    <div id="content-impressions" class="tab-content"></div>
+  </section>
+
+  <!-- ============ TAB: BUSINESS ============ -->
+  <section id="tab-business" class="tab-panel" role="tabpanel" hidden>
+    <header class="panel-head">
+      <h1 class="panel-h1">Business</h1>
+      <p class="panel-sub">Page views, units, revenue, and spend — drill by platform, category, sub-category, or SKU.</p>
+    </header>
+    <div id="filters-business" class="filter-bar" aria-label="Business filters"></div>
+    <div id="content-business" class="tab-content"></div>
+  </section>
+
+  <!-- ============ TAB: SPEND ============ -->
+  <section id="tab-spend" class="tab-panel" role="tabpanel" hidden>
+    <header class="panel-head">
+      <h1 class="panel-h1">Spend</h1>
+      <p class="panel-sub">Branded vs Generic ad spend, sales, and ROAS — across platforms and channels.</p>
+    </header>
+    <div id="filters-spend" class="filter-bar" aria-label="Spend filters"></div>
+    <div id="content-spend" class="tab-content"></div>
+  </section>
+
+  <!-- ============ TAB: INFLUENCER ============ -->
+  <section id="tab-influencer" class="tab-panel" role="tabpanel" hidden>
+    <header class="panel-head">
+      <h1 class="panel-h1">Influencer</h1>
+      <p class="panel-sub">Campaign performance and correlation with search and sales movement.</p>
+    </header>
+    <div id="filters-influencer" class="filter-bar" aria-label="Influencer filters"></div>
+    <div id="content-influencer" class="tab-content"></div>
+  </section>
+
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="assets/js/dashboard.js"></script>
+</body>
+</html>

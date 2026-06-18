@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Nat Habit Analytics — Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/dashboard.css">
+</head>
+<body class="login-page">
+  <main class="login-wrap">
+    <div class="login-card">
+      <img src="assets/img/logo.svg" alt="Nat Habit" class="login-logo" width="200" height="56">
+      <h1 class="login-title">Sales &amp; Marketing Analytics</h1>
+      <p class="login-sub">Internal dashboard. Enter the team password to continue.</p>
+
+      <form id="login-form" class="login-form" novalidate>
+        <label for="pw" class="login-label">Password</label>
+        <input id="pw" type="password" autocomplete="current-password" required
+               class="login-input" placeholder="••••••••" autofocus />
+        <button type="submit" class="login-btn">Sign in</button>
+        <p id="login-err" class="login-err" role="alert" hidden>That password didn't work. Try again.</p>
+      </form>
+
+      <p class="login-foot">If you've forgotten it, ask the marketing lead.</p>
+    </div>
+  </main>
+
+  <script type="module">
+    // Replace the hash below to change the password. To generate a new one:
+    //   echo -n "your-new-password" | sha256sum
+    // See README.md for full instructions.
+    const PASSWORD_SHA256 = "057ba03d6c44104863dc7361fe4578965d1887360f90a0895882e58a6248fc86";  // default: "changeme"
+
+    async function sha256Hex(str) {
+      const buf = new TextEncoder().encode(str);
+      const hash = await crypto.subtle.digest("SHA-256", buf);
+      return Array.from(new Uint8Array(hash))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+    }
+
+    // If already authed in this session, skip the gate.
+    if (sessionStorage.getItem("nh_authed") === "true") {
+      location.replace("dashboard.html");
+    }
+
+    const form = document.getElementById("login-form");
+    const pw = document.getElementById("pw");
+    const err = document.getElementById("login-err");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const candidate = pw.value;
+      if (!candidate) return;
+      const hash = await sha256Hex(candidate);
+      if (hash === PASSWORD_SHA256) {
+        sessionStorage.setItem("nh_authed", "true");
+        location.replace("dashboard.html");
+      } else {
+        err.hidden = false;
+        pw.select();
+      }
+    });
+  </script>
+</body>
+</html>

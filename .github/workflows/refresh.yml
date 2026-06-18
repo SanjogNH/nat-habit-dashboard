@@ -1,0 +1,59 @@
+name: Refresh dashboard data
+
+# Twice a day in IST: 1 PM and 5 PM. Cron is UTC.
+#   1 PM IST → 07:30 UTC
+#   5 PM IST → 11:30 UTC
+# Manual runs available from the Actions tab via "Run workflow".
+
+on:
+  schedule:
+    - cron: '30 7 * * *'
+    - cron: '30 11 * * *'
+  workflow_dispatch: {}
+
+# The default GITHUB_TOKEN needs contents:write to commit data back.
+permissions:
+  contents: write
+
+concurrency:
+  # If a refresh is already running and another is scheduled, skip the new one.
+  group: refresh-dashboard
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Override here only if you don't want to bake the SHEET_ID into config.py.
+      # The default in config.py wins if SHEET_ID isn't set.
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build refreshed payload
+        run: python build_dashboard.py
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # data/*.json covers both the main payload and any split side-files
+          # (e.g. sales.json) that the pipeline produces when content exceeds 5 MB.
+          git add data/*.json
+          if git diff --staged --quiet; then
+            echo "No data changes — nothing to commit."
+            exit 0
+          fi
+          git commit -m "Refresh dashboard — $(date -u '+%d %b %Y %H:%M UTC')"
+          git push
