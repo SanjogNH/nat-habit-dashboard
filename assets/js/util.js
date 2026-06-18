@@ -70,3 +70,83 @@ export function formatRelativeRefresh(metadata, source) {
   if (source === "live") return "Updated: just now (live)";
   return `Updated: ${metadata.last_updated_display}`;
 }
+
+/* ================================================================ *
+ * Collapsible table helpers (used by Business, Spend, Impressions,
+ * Influencer metric-card tables). Tables default to collapsed so the
+ * page doesn't become a wall of rows; user opens what they want to see.
+ * ================================================================ */
+
+/**
+ * Wrap a `.tbl-wrap` div in a <details>/<summary> for collapse-on-demand.
+ * Idempotent — calling twice is a no-op. Returns the <details> element.
+ */
+export function makeTableCollapsible(tblWrapEl, opts = {}) {
+  if (!tblWrapEl) return null;
+  if (tblWrapEl.parentElement?.classList.contains("tbl-collapse")) {
+    return tblWrapEl.parentElement;
+  }
+  const { label = "Show table" } = opts;
+  const details = document.createElement("details");
+  details.className = "tbl-collapse";
+  const summary = document.createElement("summary");
+  summary.className = "tbl-collapse-summary";
+  summary.innerHTML = `<span class="tbl-collapse-chev">▸</span>` +
+                      `<span class="tbl-collapse-lbl">${escapeHtml(label)}</span>`;
+  const parent = tblWrapEl.parentElement;
+  parent.insertBefore(details, tblWrapEl);
+  details.appendChild(summary);
+  details.appendChild(tblWrapEl);
+  details.addEventListener("toggle", () => updateCollapseLabel(details));
+  return details;
+}
+
+/** Update one details element's summary label based on current state + row count. */
+function updateCollapseLabel(details) {
+  const lblEl = details.querySelector(".tbl-collapse-lbl");
+  if (!lblEl) return;
+  if (details.open) { lblEl.textContent = "Hide table"; return; }
+  const tbody = details.querySelector("tbody");
+  const hasEmptyState = tbody?.querySelector(".empty-state");
+  const n = (tbody && !hasEmptyState) ? tbody.children.length : 0;
+  lblEl.textContent = n === 0
+    ? "Show table"
+    : `Show table (${n} row${n === 1 ? "" : "s"})`;
+}
+
+/**
+ * Refresh labels for every collapsible table under `rootEl`. Call from a
+ * tab's rerender after tbody contents change.
+ */
+export function syncTableCollapseLabels(rootEl) {
+  if (!rootEl) return;
+  for (const d of rootEl.querySelectorAll("details.tbl-collapse")) {
+    updateCollapseLabel(d);
+  }
+}
+
+/**
+ * Wire a "Show all tables / Hide all tables" toggle button to a tab content.
+ */
+export function wireTableToggleAll(toggleBtnEl, tabContentEl) {
+  if (!toggleBtnEl || !tabContentEl) return;
+  const updateBtn = () => {
+    const all = tabContentEl.querySelectorAll("details.tbl-collapse");
+    if (!all.length) { toggleBtnEl.hidden = true; return; }
+    toggleBtnEl.hidden = false;
+    const allOpen = [...all].every(d => d.open);
+    toggleBtnEl.textContent = allOpen ? "Hide all tables" : "Show all tables";
+  };
+  toggleBtnEl.addEventListener("click", () => {
+    const all = tabContentEl.querySelectorAll("details.tbl-collapse");
+    if (!all.length) return;
+    const anyClosed = [...all].some(d => !d.open);
+    all.forEach(d => { d.open = anyClosed; });
+    updateBtn();
+  });
+  // toggle events don't bubble — use capture phase
+  tabContentEl.addEventListener("toggle", (e) => {
+    if (e.target?.classList?.contains?.("tbl-collapse")) updateBtn();
+  }, true);
+  setTimeout(updateBtn, 0);
+}
