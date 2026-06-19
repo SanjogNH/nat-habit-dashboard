@@ -108,6 +108,7 @@ export function renderLineChart(canvas, opts) {
     yReverse = false,
     yFormat = "int",
     yTitle = "",
+    hideLegend = false,
   } = opts;
 
   const tickFn = FORMAT_TICKS[yFormat] || tickInt;
@@ -139,7 +140,7 @@ export function renderLineChart(canvas, opts) {
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
       plugins: {
-        legend: {
+        legend: hideLegend ? { display: false } : {
           position: "top",
           align: "end",
           labels: {
@@ -214,4 +215,45 @@ export function renderLineChart(canvas, opts) {
 /** Destroy any chart bound to a canvas, e.g., when switching tabs. */
 export function destroyChart(canvas) {
   _destroyExisting(canvas);
+}
+
+/**
+ * Render a custom side-legend for a Chart.js instance. Used when the default
+ * top legend would wrap into many rows (e.g. SKU Impressions, Keyword Trend
+ * where labels are long product names).
+ *
+ * The list is scrollable when items overflow; each item is click-toggleable
+ * (mirrors Chart.js's default legend behavior). Hover any item to see the
+ * full label via title tooltip.
+ *
+ * @param {HTMLElement} legendEl  Container to populate
+ * @param {Chart}       chart      Live Chart.js instance returned by renderLineChart
+ */
+export function renderSideLegend(legendEl, chart) {
+  if (!legendEl || !chart || !chart.data?.datasets) return;
+  legendEl.innerHTML = "";
+  const datasets = chart.data.datasets;
+  for (let i = 0; i < datasets.length; i++) {
+    const ds = datasets[i];
+    const label = ds.label || `Series ${i + 1}`;
+    const color = ds.borderColor || "#888";
+    const hidden = chart.getDatasetMeta(i).hidden;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "csl-item" + (hidden ? " is-hidden" : "");
+    btn.title = label;
+    btn.setAttribute("aria-label", `Toggle ${label}`);
+    btn.innerHTML =
+      `<span class="csl-swatch" style="background:${color}"></span>` +
+      `<span class="csl-label"></span>`;
+    btn.querySelector(".csl-label").textContent = label;
+    btn.addEventListener("click", () => {
+      const meta = chart.getDatasetMeta(i);
+      const newHidden = !meta.hidden;
+      chart.setDatasetVisibility(i, !newHidden);
+      chart.update();
+      btn.classList.toggle("is-hidden", newHidden);
+    });
+    legendEl.appendChild(btn);
+  }
 }
