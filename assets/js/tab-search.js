@@ -3,7 +3,8 @@
  *
  * Spec §5.1. Renders:
  *   - Filter bar: date range, granularity (Weekly/Daily), platforms,
- *     branded/generic (Weekly only), keyword multi-select (max 10).
+ *     branded/generic (both modes — daily inherits from weekly per
+ *     calculate.py enrichment), keyword multi-select (max 10).
  *   - Top Keywords table — top 10 by rank (Amazon, lower=better) or volume
  *     (others, higher=better) in the latest period of the filtered range.
  *     Movement vs previous period. CSV + Excel downloads. View-full-list modal.
@@ -212,8 +213,9 @@ function syncFromFilters() {
   LocalState.view = viewF.getValue();
   LocalState.platforms = platsF.getSelected();
   LocalState.branded = brandedF.getValue();
-  // Toggle visibility of the Branded segment based on view.
-  brandedF.el.style.display = (LocalState.view === "weekly") ? "" : "none";
+  // Keyword-type filter is now valid in both Weekly and Daily — daily rows
+  // carry a branded_bucket field enriched by the pipeline (calculate.py)
+  // from the corresponding weekly classification.
 }
 
 /* ---------------------------------------------------------------- *
@@ -270,7 +272,7 @@ function computeAggregations({ rankMode }) {
   const { range, view, platforms, branded } = LocalState;
 
   if (view === "weekly") return aggregateWeekly({ range, platforms, branded, rankMode });
-  return aggregateDaily({ range, platforms, rankMode });
+  return aggregateDaily({ range, platforms, branded, rankMode });
 }
 
 function aggregateWeekly({ range, platforms, branded, rankMode }) {
@@ -323,15 +325,18 @@ function aggregateWeekly({ range, platforms, branded, rankMode }) {
   return finishAgg(byKeyword, periodLabels, periodMeta, rankMode);
 }
 
-function aggregateDaily({ range, platforms, rankMode }) {
+function aggregateDaily({ range, platforms, branded, rankMode }) {
   const allRows = State.data.daily_sfr;
   if (!Array.isArray(allRows)) return emptyAgg();
 
   const platSet = new Set(platforms);
+  const brandedFilter = branded;
   const filtered = allRows.filter(r => {
     if (!platSet.has(r.platform)) return false;
     if (range.from && r.date < range.from) return false;
     if (range.to   && r.date > range.to)   return false;
+    if (brandedFilter !== "both" &&
+        (r.branded_bucket || "Generic").toLowerCase() !== brandedFilter) return false;
     return true;
   });
 
@@ -616,7 +621,7 @@ function describeContext(rankMode) {
     "Mode": rankMode ? "Rank (Amazon, lower = better)" : "Volume (higher = better)",
     "Date range": `${LocalState.range.from || "—"} to ${LocalState.range.to || "—"}`,
     "Platforms": LocalState.platforms,
-    "Keyword type filter": LocalState.view === "weekly" ? LocalState.branded : "n/a (daily)",
+    "Keyword type filter": LocalState.branded,
     "Generated at": new Date().toISOString(),
   };
 }
