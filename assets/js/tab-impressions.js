@@ -19,7 +19,7 @@
 
 import { State } from "./dashboard.js";
 import { createDateRange, createMultiSelect, createSegmented } from "./filters.js";
-import { renderLineChart, destroyChart, PALETTE } from "./charts.js";
+import { renderLineChart, destroyChart, renderSideLegend, PALETTE } from "./charts.js";
 import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
 import { escapeHtml, fmtInt, pctChange, toast , makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
 import {
@@ -149,7 +149,10 @@ function buildSkeleton(root) {
           </span>
         </div>
       </header>
-      <div class="chart-box is-tall"><canvas id="imp-sku-canvas"></canvas></div>
+      <div class="chart-and-legend">
+        <div class="chart-box is-tall"><canvas id="imp-sku-canvas"></canvas></div>
+        <div class="chart-side-legend" id="imp-sku-legend"></div>
+      </div>
       <div class="tbl-wrap is-scroll-y">
         <table class="data-tbl" id="imp-sku-tbl">
           <thead></thead><tbody></tbody>
@@ -558,6 +561,8 @@ function renderSkuPanel(agg) {
 
   if (!agg.weeks.length || LocalState.selectedSkus.length === 0) {
     destroyChart(canvas);
+    const legendEl = document.getElementById("imp-sku-legend");
+    if (legendEl) legendEl.innerHTML = "";
     thead.innerHTML = "";
     tbody.innerHTML = `<tr><td class="empty-state">${
       agg.weeks.length ? "Pick at least one SKU." : "No weeks in range."
@@ -572,12 +577,15 @@ function renderSkuPanel(agg) {
     data: agg.weeks.map(w => agg.bySku.get(sku)?.get(w.week_num) ?? null),
   }));
 
-  renderLineChart(canvas, {
+  const chart = renderLineChart(canvas, {
     labels,
     series,
     yFormat: "int",
     yTitle: "Impressions",
+    hideLegend: true,
   });
+  // Custom side-legend — fits many long SKU names without eating chart height.
+  renderSideLegend(document.getElementById("imp-sku-legend"), chart);
 
   // KPI: total impressions across selected SKUs in the most recent week with data.
   let total = 0;
