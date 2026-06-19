@@ -14,7 +14,7 @@
 
 import { State, loadTab } from "./dashboard.js";
 import { createDateRange, createSegmented, createMultiSelect } from "./filters.js";
-import { renderLineChart, destroyChart, PALETTE } from "./charts.js";
+import { renderLineChart, destroyChart, renderSideLegend, PALETTE } from "./charts.js";
 import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
 import { escapeHtml, fmtInt, toast } from "./util.js";
 
@@ -90,7 +90,10 @@ function buildSkeleton(root) {
           </span>
         </div>
       </header>
-      <div class="chart-box is-tall"><canvas id="search-trend-canvas"></canvas></div>
+      <div class="chart-and-legend">
+        <div class="chart-box is-tall"><canvas id="search-trend-canvas"></canvas></div>
+        <div class="chart-side-legend" id="search-trend-legend"></div>
+      </div>
     </section>
 
     <!-- Modal -->
@@ -553,9 +556,11 @@ function renderKeywordPicker(agg) {
  * ---------------------------------------------------------------- */
 function renderTrend(agg, rankMode) {
   const canvas = document.getElementById("search-trend-canvas");
+  const legendEl = document.getElementById("search-trend-legend");
   if (!canvas) return;
   if (!agg.periods.length || LocalState.selectedKeywords.length === 0) {
     destroyChart(canvas);
+    if (legendEl) legendEl.innerHTML = "";
     return;
   }
   const series = LocalState.selectedKeywords
@@ -568,13 +573,15 @@ function renderTrend(agg, rankMode) {
     })
     .filter(Boolean);
 
-  renderLineChart(canvas, {
+  const chart = renderLineChart(canvas, {
     labels: agg.periods,
     series,
     yReverse: rankMode,
     yFormat: "int",
     yTitle: rankMode ? "Search rank (lower = better)" : "Search volume",
+    hideLegend: true,
   });
+  renderSideLegend(legendEl, chart);
 }
 
 /* ---------------------------------------------------------------- *
