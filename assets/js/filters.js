@@ -186,7 +186,7 @@ export function createSegmented(opts) {
  */
 export function createMultiSelect(opts) {
   const {
-    id, label, options,
+    id, label,
     defaultSelected = null,
     allowAll = true,
     maxSelected = null,
@@ -195,7 +195,11 @@ export function createMultiSelect(opts) {
     validate = null,
   } = opts;
 
-  const allValues = options.map(o => o.value);
+  // options + allValues are mutable so setOptions can swap them at runtime
+  // (used by Search Movement: the platforms list filters to rank-capable
+  // platforms when "View by: Rank" is toggled).
+  let options = opts.options.slice();
+  let allValues = options.map(o => o.value);
   const initial = defaultSelected || allValues.slice();
   const saved = Persist.get(id, initial);
   // Clamp saved to current options.
@@ -361,6 +365,31 @@ export function createMultiSelect(opts) {
       Persist.set(id, [...selected]);
       updateLabel();
       if (!pop.hidden) renderPop();
+    },
+    /**
+     * Swap the option list at runtime. Any currently-selected items that
+     * are no longer in the new options are dropped. Returns the array of
+     * dropped values so the caller can show a toast/explanation.
+     *
+     * The default fallback param is used when the new options exist but
+     * the post-clamp selection would be empty — picks the first value of
+     * `fallbackSelected` (if any of those are in the new options) so the
+     * UI never shows an empty selection.
+     */
+    setOptions(newOptions, fallbackSelected = null) {
+      options = newOptions.slice();
+      allValues = options.map(o => o.value);
+      const dropped = [...selected].filter(v => !allValues.includes(v));
+      selected = new Set([...selected].filter(v => allValues.includes(v)));
+      if (selected.size === 0) {
+        const fb = (fallbackSelected || []).find(v => allValues.includes(v));
+        if (fb) selected.add(fb);
+        else if (allValues.length) selected.add(allValues[0]);
+      }
+      Persist.set(id, [...selected]);
+      updateLabel();
+      if (!pop.hidden) renderPop();
+      return dropped;
     },
     onChange(fn) { handlers.push(fn); },
     refresh() { updateLabel(); if (!pop.hidden) renderPop(); },
