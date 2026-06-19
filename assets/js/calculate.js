@@ -169,12 +169,36 @@ export function toNum(value) {
 /**
  * Map a "Search Query Type" or "Keyword Type" value to "Branded" or "Generic".
  * Anything not in BRANDED_TOKENS — including null, blank, "Comp", "Generic" —
- * is Generic.
+ * is Generic. Source-tag-only classifier — used by BCG which has no keyword
+ * column. For keyword-aware tabs (Weekly SFR), use classifyBranded.
  */
 export function toBrandedBucket(value) {
   if (value == null) return "Generic";
   const s = String(value).trim().toLowerCase();
   return BRANDED_TOKENS.has(s) ? "Branded" : "Generic";
+}
+
+/** Tokens that mark a keyword as Branded by its text alone. */
+const BRAND_NAME_TOKENS = ["nat habit", "nathabit"];
+
+/**
+ * Branded if EITHER:
+ *   - source tag is in BRANDED_TOKENS, OR
+ *   - keyword text contains "nat habit" or "nathabit" (case-insensitive).
+ * Otherwise Generic. Mirror of calculate.py::classify_branded.
+ */
+export function classifyBranded(keyword, sourceTag) {
+  if (sourceTag != null) {
+    const s = String(sourceTag).trim().toLowerCase();
+    if (BRANDED_TOKENS.has(s)) return "Branded";
+  }
+  if (keyword != null) {
+    const kwLc = String(keyword).toLowerCase();
+    for (const tok of BRAND_NAME_TOKENS) {
+      if (kwLc.includes(tok)) return "Branded";
+    }
+  }
+  return "Generic";
 }
 
 /** Parse a "Week23" string into 23. */
@@ -282,7 +306,10 @@ function processWeeklySfr(raw) {
     out.push({
       platform, week_num,
       search_query:  clean(rowGet(r, "Search Query")),
-      branded_bucket: toBrandedBucket(rowGet(r, "Search Query Type")),
+      branded_bucket: classifyBranded(
+        rowGet(r, "Search Query"),
+        rowGet(r, "Search Query Type")
+      ),
       category:      clean(rowGet(r, "Category")),
       subcategory:   subcategoryOf(r),
       rank,
@@ -458,6 +485,37 @@ function collectWeeks(rowsByTab) {
  * @param {string} sheetId
  * @returns {object} payload matching the Python pipeline output
  */
+/**
+ * Add a `branded_bucket` field to each row in dailyRows. Daily SFR doesn't
+ * carry a Search Query Type column; we classify by looking the keyword up
+ * in weekly SFR (case-insensitive), with a deterministic fallback for the
+ * rare case where a daily keyword isn't in the weekly data.
+ *
+ * Mirror of calculate.py::_enrich_daily_branded so live refresh produces
+ * the same classification as the scheduled commit.
+ */
+function enrichDailyBranded(dailyRows, weeklyRows) {
+  // Set of keyword (lowercased) that weekly has already classified as Branded.
+  const weeklyBranded = new Set();
+  for (const r of weeklyRows) {
+    if (r.search_query && r.branded_bucket === "Branded") {
+      weeklyBranded.add(r.search_query.trim().toLowerCase());
+    }
+  }
+  for (const r of dailyRows) {
+    const kw = (r.keyword || "").trim();
+    if (!kw) { r.branded_bucket = "Generic"; continue; }
+    // Substring rule first (keyword-only classification).
+    const byRule = classifyBranded(kw, null);
+    if (byRule === "Branded") {
+      r.branded_bucket = "Branded";
+      continue;
+    }
+    // Otherwise inherit from weekly if classified Branded there.
+    r.branded_bucket = weeklyBranded.has(kw.toLowerCase()) ? "Branded" : "Generic";
+  }
+}
+
 export function buildPayloadFromRows(rawByTab, sheetId) {
   const rowsByTab = {};
   const rowCounts = {};
@@ -468,6 +526,9 @@ export function buildPayloadFromRows(rawByTab, sheetId) {
     rowsByTab[key] = out;
     rowCounts[key] = out.length;
   }
+  // Enrich daily SFR rows with branded_bucket derived from weekly classifications.
+  enrichDailyBranded(rowsByTab.daily_sfr, rowsByTab.weekly_sfr);
+
   const platforms = collectPlatforms(rowsByTab);
   const { cats, tree } = collectCategoryTree(rowsByTab);
   const dateRange = collectDateRange(rowsByTab);
