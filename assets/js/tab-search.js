@@ -162,21 +162,18 @@ function buildFilters() {
   });
   bar.appendChild(viewF.el);
 
-  // Platforms — partitioned into rank-based and volume-based.
-  const platformOptions = (md.platforms || []).map(p => ({
-    value: p, label: p,
-    group: RANK_PLATFORMS.has(p) ? "Rank-based" : "Volume-based",
-  }));
+  // Platforms — flat alphabetical list (the rank-based/volume-based grouping
+  // was misleading once Amazon could contribute volume in mixed mode). The
+  // "View by" toggle now drives which subset is shown.
+  const ALL_PLATFORM_OPTIONS = (md.platforms || []).map(p => ({ value: p, label: p }));
+  const RANK_PLATFORM_OPTIONS = ALL_PLATFORM_OPTIONS.filter(o => RANK_PLATFORMS.has(o.value));
   const platsF = createMultiSelect({
     id: "search.platforms",
     label: "Platforms",
-    options: platformOptions,
-    defaultSelected: platformOptions.some(o => o.value === "Amazon") ? ["Amazon"] : platformOptions.slice(0, 1).map(o => o.value),
+    options: ALL_PLATFORM_OPTIONS,
+    defaultSelected: ALL_PLATFORM_OPTIONS.some(o => o.value === "Amazon") ? ["Amazon"] : ALL_PLATFORM_OPTIONS.slice(0, 1).map(o => o.value),
     allowAll: false,
     validate: (value, nextSet) => {
-      // Amazon can now be mixed with volume-based platforms — it contributes
-      // its own `volume` field. The only remaining constraint is that at
-      // least one platform must be selected.
       if (nextSet.size === 0) {
         return "At least one platform must remain selected.";
       }
@@ -213,14 +210,47 @@ function buildFilters() {
   });
   bar.appendChild(metricF.el);
 
+  // Stash option lists so the metric toggle's onChange handler can swap them.
+  LocalState._allPlatformOptions  = ALL_PLATFORM_OPTIONS;
+  LocalState._rankPlatformOptions = RANK_PLATFORM_OPTIONS;
+
   // Wire change events.
   LocalState.filters = { dateF, viewF, platsF, brandedF, metricF };
   syncFromFilters();
+  // If we're starting in Rank mode + Weekly, clamp the platforms picker now
+  // (in case persisted state has Volume-only platforms selected).
+  applyMetricModeToPicker(/* toastOnDrop */ false);
   dateF.onChange(() => { syncFromFilters(); rerender(); });
-  viewF.onChange(() => { syncFromFilters(); rerender(); });
+  viewF.onChange(() => { syncFromFilters(); applyMetricModeToPicker(false); rerender(); });
   platsF.onChange(() => { syncFromFilters(); rerender(); });
   brandedF.onChange(() => { syncFromFilters(); rerender(); });
-  metricF.onChange(() => { syncFromFilters(); rerender(); });
+  metricF.onChange(() => { syncFromFilters(); applyMetricModeToPicker(true); rerender(); });
+}
+
+/**
+ * Make the Platforms picker reflect the current "View by" toggle state.
+ *   Rank mode  → show only rank-capable platforms
+ *   Volume mode → show all platforms
+ * If currently-selected platforms get filtered out (e.g., switching to Rank
+ * with Flipkart selected), they're dropped and a toast explains.
+ */
+function applyMetricModeToPicker(toastOnDrop) {
+  const { platsF, viewF, metricF } = LocalState.filters || {};
+  if (!platsF || !viewF || !metricF) return;
+  const isWeekly = viewF.getValue() === "weekly";
+  const rankMode = metricF.getValue() === "rank";
+  // In Daily view, the toggle is hidden — keep the full platform list.
+  const newOptions = (isWeekly && rankMode)
+    ? LocalState._rankPlatformOptions
+    : LocalState._allPlatformOptions;
+  const fallback = newOptions.some(o => o.value === "Amazon") ? ["Amazon"] : [];
+  const dropped = platsF.setOptions(newOptions, fallback);
+  // Sync LocalState since selection may have changed.
+  LocalState.platforms = platsF.getSelected();
+  if (toastOnDrop && dropped.length) {
+    const names = dropped.join(", ");
+    toast(`Hidden ${names} — no rank data available.`);
+  }
 }
 
 function syncFromFilters() {
@@ -240,8 +270,10 @@ function syncFromFilters() {
 /**
  * Decide whether the chart should be in rank mode right now.
  *
- *   Weekly + Amazon-only + user toggle = "rank" → rank mode (Amazon's
- *     traditional view; lower numbers = better). Otherwise volume mode.
+ *   Weekly + user toggle = "rank" → rank mode. The Platforms picker is
+ *     already filtered to rank-capable platforms by
+ *     applyMetricModeToPicker(), so "all selected platforms are rank-
+ *     capable" is guaranteed in this state.
  *   Daily: rank mode whenever Amazon is selected (Daily SFR has no volume
  *     column — Amazon's daily values are ranks).
  *
@@ -249,10 +281,8 @@ function syncFromFilters() {
  */
 function currentRankMode() {
   const isWeekly = LocalState.view === "weekly";
-  const amazonOnly =
-    LocalState.platforms.length === 1 && LocalState.platforms[0] === "Amazon";
   if (isWeekly) {
-    return amazonOnly && LocalState.metricMode === "rank";
+    return LocalState.metricMode === "rank";
   }
   // Daily: any Amazon selection → rank mode (Daily SFR has no volume column).
   return LocalState.platforms.some(p => RANK_PLATFORMS.has(p));
@@ -260,15 +290,13 @@ function currentRankMode() {
 
 function rerender() {
   const isWeekly = LocalState.view === "weekly";
-  const amazonOnly = LocalState.platforms.length === 1 && LocalState.platforms[0] === "Amazon";
 
-  // Show the "View by" toggle only when meaningful: Weekly view + Amazon
-  // is the sole selected platform. In any other case the metric is forced
-  // (Volume for non-Amazon-only weekly + mixed weekly; Daily inherits its
-  // platform-driven mode below).
+  // Toggle visibility: show in Weekly when at least one rank-capable
+  // platform exists in the data. Hide in Daily (single field per row).
   const metricF = LocalState.filters?.metricF;
   if (metricF) {
-    metricF.el.style.display = (isWeekly && amazonOnly) ? "" : "none";
+    const anyRankCapable = (LocalState._rankPlatformOptions || []).length > 0;
+    metricF.el.style.display = (isWeekly && anyRankCapable) ? "" : "none";
   }
 
   const rankMode = currentRankMode();
@@ -276,11 +304,11 @@ function rerender() {
   // Mode notice — describes what the user is looking at.
   const notice = document.getElementById("search-mode-notice");
   if (rankMode) {
-    const ctx = isWeekly ? "Weekly Amazon" : "Amazon";
-    notice.innerHTML = `<strong>Rank mode (${ctx})</strong> — lower numbers are better. Movement arrows show rank changes. Only keywords inside Amazon's ranked set appear.`;
+    const ctx = isWeekly ? "Weekly" : "Amazon";
+    notice.innerHTML = `<strong>Rank mode (${ctx})</strong> — lower numbers are better. Movement arrows show rank changes. Only keywords inside the ranked set appear.`;
     notice.hidden = false;
-  } else if (isWeekly && amazonOnly) {
-    notice.innerHTML = `<strong>Volume mode (Amazon weekly)</strong> — search volume per keyword, including those without an Amazon rank.`;
+  } else if (isWeekly && LocalState.platforms.length === 1) {
+    notice.innerHTML = `<strong>Volume mode</strong> — search volume per keyword on ${escapeHtml(LocalState.platforms[0])}.`;
     notice.hidden = false;
   } else if (LocalState.platforms.length > 1) {
     notice.innerHTML = `<strong>Volume mode</strong> — searches summed across ${LocalState.platforms.length} platforms.`;
