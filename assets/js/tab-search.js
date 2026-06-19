@@ -174,12 +174,9 @@ function buildFilters() {
     defaultSelected: platformOptions.some(o => o.value === "Amazon") ? ["Amazon"] : platformOptions.slice(0, 1).map(o => o.value),
     allowAll: false,
     validate: (value, nextSet) => {
-      // Reject mixing Amazon (rank) with non-Amazon (volume).
-      const hasAmazon = nextSet.has("Amazon");
-      const hasOther = [...nextSet].some(v => v !== "Amazon");
-      if (hasAmazon && hasOther) {
-        return "Amazon (rank) can't be combined with volume-based platforms. Deselect one side first.";
-      }
+      // Amazon can now be mixed with volume-based platforms — it contributes
+      // its own `volume` field. The only remaining constraint is that at
+      // least one platform must be selected.
       if (nextSet.size === 0) {
         return "At least one platform must remain selected.";
       }
@@ -201,37 +198,89 @@ function buildFilters() {
   });
   bar.appendChild(brandedF.el);
 
+  // "View by" — only meaningful when Amazon is the sole selected platform
+  // in Weekly view. Defaults to Rank (Amazon's traditional view) but the
+  // user can flip to Volume to surface keywords that have no rank.
+  // Visibility is managed in rerender().
+  const metricF = createSegmented({
+    id: "search.metric",
+    label: "View by",
+    options: [
+      { value: "rank",   label: "Rank" },
+      { value: "volume", label: "Volume" },
+    ],
+    defaultValue: "rank",
+  });
+  bar.appendChild(metricF.el);
+
   // Wire change events.
-  LocalState.filters = { dateF, viewF, platsF, brandedF };
+  LocalState.filters = { dateF, viewF, platsF, brandedF, metricF };
   syncFromFilters();
   dateF.onChange(() => { syncFromFilters(); rerender(); });
   viewF.onChange(() => { syncFromFilters(); rerender(); });
   platsF.onChange(() => { syncFromFilters(); rerender(); });
   brandedF.onChange(() => { syncFromFilters(); rerender(); });
+  metricF.onChange(() => { syncFromFilters(); rerender(); });
 }
 
 function syncFromFilters() {
-  const { dateF, viewF, platsF, brandedF } = LocalState.filters;
+  const { dateF, viewF, platsF, brandedF, metricF } = LocalState.filters;
   LocalState.range = dateF.getRange();
   LocalState.view = viewF.getValue();
   LocalState.platforms = platsF.getSelected();
   LocalState.branded = brandedF.getValue();
-  // Keyword-type filter is now valid in both Weekly and Daily — daily rows
-  // carry a branded_bucket field enriched by the pipeline (calculate.py)
-  // from the corresponding weekly classification.
+  LocalState.metricMode = metricF.getValue();   // 'rank' or 'volume'
+  // Keyword-type filter is valid in both Weekly and Daily — daily rows
+  // carry a branded_bucket field enriched by the pipeline.
 }
 
 /* ---------------------------------------------------------------- *
  * Re-render everything that depends on filter state
  * ---------------------------------------------------------------- */
-function rerender() {
-  // Determine mode: rank if any selected platform is rank-based, otherwise volume.
-  const rankMode = LocalState.platforms.some(p => RANK_PLATFORMS.has(p));
+/**
+ * Decide whether the chart should be in rank mode right now.
+ *
+ *   Weekly + Amazon-only + user toggle = "rank" → rank mode (Amazon's
+ *     traditional view; lower numbers = better). Otherwise volume mode.
+ *   Daily: rank mode whenever Amazon is selected (Daily SFR has no volume
+ *     column — Amazon's daily values are ranks).
+ *
+ * Single source of truth so the various render + download paths agree.
+ */
+function currentRankMode() {
+  const isWeekly = LocalState.view === "weekly";
+  const amazonOnly =
+    LocalState.platforms.length === 1 && LocalState.platforms[0] === "Amazon";
+  if (isWeekly) {
+    return amazonOnly && LocalState.metricMode === "rank";
+  }
+  // Daily: any Amazon selection → rank mode (Daily SFR has no volume column).
+  return LocalState.platforms.some(p => RANK_PLATFORMS.has(p));
+}
 
-  // Mode notice.
+function rerender() {
+  const isWeekly = LocalState.view === "weekly";
+  const amazonOnly = LocalState.platforms.length === 1 && LocalState.platforms[0] === "Amazon";
+
+  // Show the "View by" toggle only when meaningful: Weekly view + Amazon
+  // is the sole selected platform. In any other case the metric is forced
+  // (Volume for non-Amazon-only weekly + mixed weekly; Daily inherits its
+  // platform-driven mode below).
+  const metricF = LocalState.filters?.metricF;
+  if (metricF) {
+    metricF.el.style.display = (isWeekly && amazonOnly) ? "" : "none";
+  }
+
+  const rankMode = currentRankMode();
+
+  // Mode notice — describes what the user is looking at.
   const notice = document.getElementById("search-mode-notice");
   if (rankMode) {
-    notice.innerHTML = `<strong>Rank mode (Amazon)</strong> — lower numbers are better. Movement arrows show rank changes.`;
+    const ctx = isWeekly ? "Weekly Amazon" : "Amazon";
+    notice.innerHTML = `<strong>Rank mode (${ctx})</strong> — lower numbers are better. Movement arrows show rank changes. Only keywords inside Amazon's ranked set appear.`;
+    notice.hidden = false;
+  } else if (isWeekly && amazonOnly) {
+    notice.innerHTML = `<strong>Volume mode (Amazon weekly)</strong> — search volume per keyword, including those without an Amazon rank.`;
     notice.hidden = false;
   } else if (LocalState.platforms.length > 1) {
     notice.innerHTML = `<strong>Volume mode</strong> — searches summed across ${LocalState.platforms.length} platforms.`;
@@ -547,7 +596,7 @@ function renderKeywordPicker(agg) {
 
   _keywordPicker.onChange(sel => {
     LocalState.selectedKeywords = sel;
-    renderTrend(LocalState._agg, LocalState.platforms.some(p => RANK_PLATFORMS.has(p)));
+    renderTrend(LocalState._agg, currentRankMode());
   });
 }
 
@@ -589,7 +638,7 @@ function renderTrend(agg, rankMode) {
  * ---------------------------------------------------------------- */
 function openModal() {
   const agg = LocalState._agg;
-  const rankMode = LocalState.platforms.some(p => RANK_PLATFORMS.has(p));
+  const rankMode = currentRankMode();
   if (!agg || !agg.latestPeriod) {
     toast("No data to show.");
     return;
@@ -671,7 +720,7 @@ function downloadTopTable(kind) {
   if (!rows.length) { toast("Nothing to download."); return; }
   const fname = `nat-habit_top-keywords_${ts()}`;
   if (kind === "csv") return downloadCSV(`${fname}.csv`, columns, rows);
-  const rankMode = LocalState.platforms.some(p => RANK_PLATFORMS.has(p));
+  const rankMode = currentRankMode();
   downloadXLSX(`${fname}.xlsx`, [
     { name: "Top 10", columns, rows },
     rawRowsSheet("Filtered rows"),
@@ -684,7 +733,7 @@ function downloadFullTable(kind) {
   if (!rows.length) { toast("Nothing to download."); return; }
   const fname = `nat-habit_all-keywords_${ts()}`;
   if (kind === "csv") return downloadCSV(`${fname}.csv`, columns, rows);
-  const rankMode = LocalState.platforms.some(p => RANK_PLATFORMS.has(p));
+  const rankMode = currentRankMode();
   downloadXLSX(`${fname}.xlsx`, [
     { name: "All keywords", columns, rows },
     rawRowsSheet("Filtered rows"),
@@ -712,7 +761,7 @@ function downloadTrend(kind) {
   if (!rows.length) { toast("Pick at least one keyword."); return; }
   const fname = `nat-habit_keyword-trend_${ts()}`;
   if (kind === "csv") return downloadCSV(`${fname}.csv`, cols, rows);
-  const rankMode = LocalState.platforms.some(p => RANK_PLATFORMS.has(p));
+  const rankMode = currentRankMode();
   downloadXLSX(`${fname}.xlsx`, [
     { name: "Trend (selected)", columns: cols, rows },
     rawRowsSheet("Filtered rows"),
