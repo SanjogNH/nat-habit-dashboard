@@ -935,3 +935,87 @@ a:hover { text-decoration: underline; }
 @media (max-width: 768px) {
   .fl-tbl-toggle { min-height: 44px; align-self: stretch; margin-left: 0; }
 }
+
+/* ==========================================================================
+   Custom side-legend (used by SKU Impressions and Keyword Trend charts
+   where default top legend overflows with long labels)
+   ========================================================================== */
+.chart-and-legend {
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+}
+.chart-and-legend > .chart-box {
+  flex: 1 1 auto;
+  min-width: 0;   /* allow flex item to shrink under content */
+}
+.chart-side-legend {
+  flex: 0 0 220px;
+  max-width: 220px;
+  max-height: 360px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 4px 4px 0;
+  border-left: 1px solid var(--brand-border);
+  padding-left: 12px;
+}
+.csl-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--r-sm, 4px);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--brand-deep);
+  transition: background 0.12s, color 0.12s, opacity 0.12s;
+  width: 100%;
+  min-width: 0;
+}
+.csl-item:hover {
+  background: var(--brand-accent);
+}
+.csl-item.is-hidden {
+  color: var(--brand-muted-2);
+  opacity: 0.55;
+}
+.csl-item.is-hidden .csl-label {
+  text-decoration: line-through;
+}
+.csl-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 10px;
+}
+.csl-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Mobile: stack legend below chart, full width, capped height */
+@media (max-width: 768px) {
+  .chart-and-legend {
+    flex-direction: column;
+  }
+  .chart-side-legend {
+    flex: 0 0 auto;
+    max-width: none;
+    width: 100%;
+    max-height: 160px;
+    border-left: none;
+    border-top: 1px solid var(--brand-border);
+    padding-left: 0;
+    padding-top: 8px;
+  }
+}
