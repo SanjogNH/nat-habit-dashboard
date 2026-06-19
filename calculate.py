@@ -118,12 +118,45 @@ def week_num_from_label(label: str | None) -> int | None:
 # Bucket mapping — §4.3
 # ---------------------------------------------------------------------------
 def to_branded_bucket(value: Any) -> str:
-    """Map a 'Search Query Type' / 'Keyword Type' cell to 'Branded' or 'Generic'."""
+    """Map a 'Search Query Type' / 'Keyword Type' cell to 'Branded' or 'Generic'.
+
+    Source-tag-only classifier. Used by tabs that don't carry the keyword
+    text (e.g., BCG Data). For keyword-aware classification use
+    classify_branded() instead.
+    """
     if value is None:
         return "Generic"
     if isinstance(value, float) and math.isnan(value):
         return "Generic"
     return "Branded" if str(value).strip().lower() in BRANDED_TOKENS else "Generic"
+
+
+# Keyword tokens that mark a search term as Branded by definition.
+BRAND_NAME_TOKENS = ("nat habit", "nathabit")
+
+
+def classify_branded(keyword: Any, source_tag: Any = None) -> str:
+    """Classify a search term as 'Branded' or 'Generic'.
+
+    Branded if EITHER:
+      - the source tag column (Search Query Type / Keyword Type) is in
+        BRANDED_TOKENS, OR
+      - the keyword text contains "nat habit" or "nathabit" (case-insensitive).
+
+    Otherwise Generic. Used everywhere a keyword text is available so Daily
+    and Weekly use the same definition (spec §4.3 + custom rule of thumb).
+    """
+    # Source-tag check first.
+    if source_tag is not None and not (isinstance(source_tag, float) and math.isnan(source_tag)):
+        if str(source_tag).strip().lower() in BRANDED_TOKENS:
+            return "Branded"
+    # Substring rule.
+    if keyword is not None and not (isinstance(keyword, float) and math.isnan(keyword)):
+        kw_lc = str(keyword).lower()
+        for tok in BRAND_NAME_TOKENS:
+            if tok in kw_lc:
+                return "Branded"
+    return "Generic"
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +254,13 @@ def process_weekly_sfr(raw: pd.DataFrame) -> tuple[list[dict], pd.DataFrame]:
     df["search_query"] = df.get("Search Query", pd.Series([None] * len(df))).astype("string").str.strip()
     df["category"] = df.get("Category", pd.Series([None] * len(df))).astype("string").str.strip()
     df["subcategory"] = df.get("Subcategory", pd.Series([None] * len(df))).astype("string").str.strip()
-    df["branded_bucket"] = df.get("Search Query Type", pd.Series([None] * len(df))).map(to_branded_bucket)
+    df["branded_bucket"] = [
+        classify_branded(kw, st)
+        for kw, st in zip(
+            df.get("Search Query", pd.Series([None] * len(df))),
+            df.get("Search Query Type", pd.Series([None] * len(df))),
+        )
+    ]
     df["rank"] = to_num(df.get("Search Frequency Rank")) if "Search Frequency Rank" in df.columns else pd.NA
     # Amazon SFR uses 0 as "not in the ranked set this week"; treat as missing.
     if "rank" in df.columns:
@@ -387,6 +426,37 @@ def _collect_weeks(processed_dfs: dict[str, pd.DataFrame]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Top-level entry point
 # ---------------------------------------------------------------------------
+def _enrich_daily_branded(daily_rows: list[dict], weekly_rows: list[dict]) -> None:
+    """Add a 'branded_bucket' field to each row in daily_rows.
+
+    A daily keyword is Branded if EITHER:
+      1. its text contains "nat habit" or "nathabit" (case-insensitive), OR
+      2. the same keyword appears in weekly_sfr and is classified as Branded
+         there (which itself already encodes the substring rule + source tag).
+
+    Otherwise Generic.
+
+    Mutates `daily_rows` in place. Mirror of calculate.js::enrichDailyBranded.
+    """
+    weekly_branded = set()
+    for r in weekly_rows:
+        kw = r.get("search_query")
+        if kw and r.get("branded_bucket") == "Branded":
+            weekly_branded.add(kw.strip().lower())
+
+    for r in daily_rows:
+        kw = (r.get("keyword") or "").strip()
+        if not kw:
+            r["branded_bucket"] = "Generic"
+            continue
+        # Use the same classifier — keyword-only path. Then OR-in weekly inheritance.
+        bucket = classify_branded(kw, None)
+        if bucket == "Branded":
+            r["branded_bucket"] = "Branded"
+            continue
+        r["branded_bucket"] = "Branded" if kw.lower() in weekly_branded else "Generic"
+
+
 def build_payload(raw_frames: dict[str, pd.DataFrame], sheet_id: str) -> dict:
     """Process every raw frame and assemble the final JSON-ready dict per §8."""
     processors = {
@@ -408,6 +478,10 @@ def build_payload(raw_frames: dict[str, pd.DataFrame], sheet_id: str) -> dict:
         rows_by_tab[key] = rows
         dfs_by_tab[key] = df
         row_counts[key] = len(rows)
+
+    # Enrich daily SFR rows with a branded_bucket field, derived from weekly
+    # SFR classifications (primary) plus a substring fallback (safety net).
+    _enrich_daily_branded(rows_by_tab["daily_sfr"], rows_by_tab["weekly_sfr"])
 
     platforms = _collect_platforms(dfs_by_tab)
     cats, tree = _collect_category_tree(dfs_by_tab)
