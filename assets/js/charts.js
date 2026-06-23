@@ -106,6 +106,7 @@ export function renderLineChart(canvas, opts) {
   const {
     labels, series,
     yReverse = false,
+    rankMode = false,   // true = lower value is better (rank); flips tooltip delta arrows
     yFormat = "int",
     yTitle = "",
     hideLegend = false,
@@ -170,7 +171,7 @@ export function renderLineChart(canvas, opts) {
               let deltaStr = "";
               if (prev != null && prev !== 0) {
                 const diff = v - prev;
-                if (yReverse) {
+                if (rankMode) {
                   // Rank: lower is better. Improvement is negative diff.
                   const sign = diff < 0 ? "↑" : (diff > 0 ? "↓" : "→");
                   deltaStr = `  ${sign}${Math.abs(diff)}`;
