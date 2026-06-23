@@ -1,938 +1,853 @@
 /**
- * tab-business.js — Business tab.
+ * tab-search.js — Search Movement tab.
  *
- * Spec §5.3 + extensions:
- *   - Five chart+table pairs: Page Views, Units Sold, Revenue, Spend, ROAS.
- *   - ROAS = ad-attributable Sales / Spend (from BCG Data). Only Amazon has
- *     spend data currently; other platforms will show nulls/gaps gracefully.
- *   - Multi-category selection at Category/Subcategory view level:
- *       - 1 selected  → single combined line (same as before)
- *       - 2–10 selected → one line per category/subcategory + one "Combined" line
- *       - >10 cap enforced with a warning
- *
- * Data sources:
- *   - sales.json (lazy-loaded) for page_views/units/revenue.
- *   - bcg_spend (already in main payload) for spend + ad-sales (ROAS).
- *   - weekly_catalogue for SKU → product-name lookup.
+ * Spec §5.1. Renders:
+ *   - Filter bar: date range, granularity (Weekly/Daily), platforms,
+ *     branded/generic (both modes — daily inherits from weekly per
+ *     calculate.py enrichment), keyword multi-select (max 10).
+ *   - Top Keywords table — top 10 by rank (Amazon, lower=better) or volume
+ *     (others, higher=better) in the latest period of the filtered range.
+ *     Movement vs previous period. CSV + Excel downloads. View-full-list modal.
+ *   - Keyword Trend chart — multi-line overlay (up to 10 keywords) across the
+ *     filtered range. Y-axis reversed in rank mode.
  */
 
 import { State, loadTab } from "./dashboard.js";
 import { createDateRange, createSegmented, createMultiSelect } from "./filters.js";
-import { renderLineChart, destroyChart, PALETTE } from "./charts.js";
+import { renderLineChart, destroyChart, renderSideLegend, PALETTE } from "./charts.js";
 import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
-import { escapeHtml, fmtInt, fmtINR, fmtROAS, pctChange, toast,
-         makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
-import {
-  bucketKey, enumeratePeriods,
-  lastIndexWithData, findPrevWithData,
-  pluralize, deltaPill, tsForFilename,
-} from "./aggregate.js";
+import { escapeHtml, fmtInt, toast } from "./util.js";
 
-/* ---------------------------------------------------------------- *
- * Constants
- * ---------------------------------------------------------------- */
-const METRICS = [
-  { key: "page_views", label: "Page Views",  fmt: fmtInt, yFormat: "int",
-    yTitle: "Page views", skuOk: true, spendOnly: false },
-  { key: "units",      label: "Units Sold",  fmt: fmtInt, yFormat: "int",
-    yTitle: "Units",      skuOk: true, spendOnly: false },
-  { key: "revenue",    label: "Revenue",     fmt: fmtINR, yFormat: "inr",
-    yTitle: "Revenue (₹)", skuOk: true, spendOnly: false },
-  { key: "spend",      label: "Spend",       fmt: fmtINR, yFormat: "inr",
-    yTitle: "Spend (₹)",  skuOk: false, spendOnly: true },
-  { key: "roas",       label: "ROAS",        fmt: fmtROAS, yFormat: "roas",
-    yTitle: "ROAS (Sales / Spend)", skuOk: false, spendOnly: true },
-];
+const RANK_PLATFORMS = new Set(["Amazon"]);
+const KEYWORD_TREND_LIMIT = 10;
 
-const MULTI_DIM_LIMIT = 10;   // max selectable dims for multi-line mode
-
-/* ---------------------------------------------------------------- *
- * Module-local state
- * ---------------------------------------------------------------- */
+/** Tab-local UI state — separate from app-global filters so React-style. */
 const LocalState = {
+  view: "weekly",          // 'weekly' | 'daily'
   range: { from: "", to: "" },
-  gran: "weekly",
   platforms: [],
-  level: "overall",       // 'overall' | 'category' | 'subcategory' | 'sku'
-  dim: "__all__",         // used for SKU; category/subcategory use dims[]
-  dims: [],               // multi-selected category/subcategory values
-  filters: null,
-  salesRows: null,        // populated on first lazy-load
-  skuLookup: null,        // Map<nh_sku, short_code>
-  _agg: null,
-  _dimMultiSelect: null,  // reference to the multi-select widget (cat/sub levels)
+  branded: "both",         // 'both' | 'branded' | 'generic' (Weekly only)
+  selectedKeywords: [],
+  filters: null,           // map of widget refs
 };
 
+/* ---------------------------------------------------------------- *
+ * Public entry
+ * ---------------------------------------------------------------- */
 let _built = false;
 
 /** Reset module state (called by Live Refresh to force a rebuild). */
 export function reset() {
   _built = false;
-  LocalState.salesRows = null;
-  LocalState._dimMultiSelect = null;
 }
 
-/* ---------------------------------------------------------------- *
- * Public entry
- * ---------------------------------------------------------------- */
-export async function renderBusinessTab() {
-  const root = document.getElementById("content-business");
+/** Build the tab markup + filters once; subsequent calls just re-render. */
+export function renderSearchTab() {
+  const root = document.getElementById("content-search");
   if (!root || !State.data) return;
-
   if (!_built) {
     _built = true;
     buildSkeleton(root);
     buildFilters();
-    LocalState.skuLookup = buildSkuLookup();
-  }
-
-  // Lazy-load sales.json the first time.
-  if (LocalState.salesRows == null) {
-    showOverlay(root, "Loading sales data…");
-    try {
-      LocalState.salesRows = await loadTab("sales");
-    } catch (err) {
-      showOverlay(root, `Failed to load sales data: ${err.message}`, true);
-      return;
-    } finally {
-      hideOverlay();
-    }
   }
   rerender();
 }
 
 /* ---------------------------------------------------------------- *
- * Skeleton — one section card per metric
+ * DOM skeleton — replaces the milestone-2 placeholder content
  * ---------------------------------------------------------------- */
 function buildSkeleton(root) {
-  const sections = METRICS.map(m => `
-    <section class="section-card" data-metric="${m.key}">
+  root.innerHTML = `
+    <div id="search-mode-notice" class="mode-notice" hidden></div>
+
+    <section class="section-card">
       <header class="section-head">
-        <h2 class="section-title">${m.label}
-          <span class="section-meta" id="bus-${m.key}-kpi"></span>
-        </h2>
+        <h2 class="section-title">Top keywords <span id="search-mode-subtitle" class="section-meta"></span></h2>
         <div class="section-actions">
-          <span class="section-meta" id="bus-${m.key}-meta"></span>
-          <button class="icon-btn" data-dl="csv" data-metric="${m.key}">CSV</button>
-          <button class="icon-btn" data-dl="xlsx" data-metric="${m.key}">Excel</button>
+          <span id="search-table-meta" class="section-meta"></span>
+          <button class="icon-btn" id="search-top-csv">CSV</button>
+          <button class="icon-btn" id="search-top-xlsx">Excel</button>
         </div>
       </header>
-      <div class="chart-box"><canvas id="bus-${m.key}-canvas"></canvas></div>
-      <div class="tbl-wrap is-scroll-y">
-        <table class="data-tbl" id="bus-${m.key}-tbl">
+      <div class="tbl-wrap">
+        <table class="data-tbl" id="search-top-tbl">
           <thead></thead>
           <tbody></tbody>
         </table>
       </div>
-      <div class="empty-state" id="bus-${m.key}-empty" hidden></div>
+      <button class="expand-btn" id="search-expand-btn">View full keyword list →</button>
     </section>
-  `).join("");
 
-  root.innerHTML = `
-    <div id="bus-overlay" class="bus-overlay" hidden>
-      <div class="boot-spinner" aria-hidden="true"></div>
-      <p id="bus-overlay-msg" class="boot-msg">Loading…</p>
+    <section class="section-card">
+      <header class="section-head">
+        <h2 class="section-title">Keyword trend</h2>
+        <div class="keyword-pickline">
+          <span class="section-meta">Keywords:</span>
+          <span id="search-keyword-picker-slot"></span>
+          <span class="section-actions">
+            <button class="icon-btn" id="search-trend-csv">CSV</button>
+            <button class="icon-btn" id="search-trend-xlsx">Excel</button>
+          </span>
+        </div>
+      </header>
+      <div class="chart-and-legend">
+        <div class="chart-box is-tall"><canvas id="search-trend-canvas"></canvas></div>
+        <div class="chart-side-legend" id="search-trend-legend"></div>
+      </div>
+    </section>
+
+    <!-- Modal -->
+    <div class="modal-overlay" id="search-modal" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <h2>All keywords</h2>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <button class="icon-btn" id="search-full-csv">CSV</button>
+            <button class="icon-btn" id="search-full-xlsx">Excel</button>
+            <button class="modal-close" id="search-modal-close" aria-label="Close">×</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <table class="data-tbl" id="search-full-tbl">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </div>
-    ${sections}
   `;
 
-  root.querySelectorAll("[data-dl]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      downloadMetric(btn.dataset.metric, btn.dataset.dl);
-    });
+  // Modal close handlers.
+  document.getElementById("search-modal-close").addEventListener("click", closeModal);
+  document.getElementById("search-modal").addEventListener("click", (e) => {
+    if (e.target.id === "search-modal") closeModal();
   });
+  document.getElementById("search-expand-btn").addEventListener("click", openModal);
 
-  root.querySelectorAll(".section-card > .tbl-wrap").forEach(el => makeTableCollapsible(el));
+  // Download buttons.
+  document.getElementById("search-top-csv").addEventListener("click", () => downloadTopTable("csv"));
+  document.getElementById("search-top-xlsx").addEventListener("click", () => downloadTopTable("xlsx"));
+  document.getElementById("search-full-csv").addEventListener("click", () => downloadFullTable("csv"));
+  document.getElementById("search-full-xlsx").addEventListener("click", () => downloadFullTable("xlsx"));
+  document.getElementById("search-trend-csv").addEventListener("click", () => downloadTrend("csv"));
+  document.getElementById("search-trend-xlsx").addEventListener("click", () => downloadTrend("xlsx"));
 }
 
 /* ---------------------------------------------------------------- *
- * Filter bar
+ * Filter bar — built once
  * ---------------------------------------------------------------- */
 function buildFilters() {
-  const bar = document.getElementById("filters-business");
+  const bar = document.getElementById("filters-search");
   if (!bar) return;
   bar.innerHTML = "";
 
   const md = State.data.metadata;
   const dr = md.date_range || {};
 
+  // Date range
   const dateF = createDateRange({
-    id: "business.range",
+    id: "search.range",
     minDate: dr.min,
     maxDate: dr.max,
     defaultDays: 90,
   });
   bar.appendChild(dateF.el);
 
-  const granF = createSegmented({
-    id: "business.gran",
-    label: "Granularity",
-    options: [
-      { value: "daily",   label: "Daily" },
-      { value: "weekly",  label: "Weekly" },
-      { value: "monthly", label: "Monthly" },
-    ],
+  // Granularity
+  const viewF = createSegmented({
+    id: "search.view",
+    label: "View by",
+    options: [{ value: "weekly", label: "Weekly" }, { value: "daily", label: "Daily" }],
     defaultValue: "weekly",
   });
-  bar.appendChild(granF.el);
+  bar.appendChild(viewF.el);
 
-  const platformOptions = (md.platforms || []).map(p => ({ value: p, label: p }));
+  // Platforms — flat alphabetical list (the rank-based/volume-based grouping
+  // was misleading once Amazon could contribute volume in mixed mode). The
+  // "View by" toggle now drives which subset is shown.
+  const ALL_PLATFORM_OPTIONS = (md.platforms || []).map(p => ({ value: p, label: p }));
+  const RANK_PLATFORM_OPTIONS = ALL_PLATFORM_OPTIONS.filter(o => RANK_PLATFORMS.has(o.value));
   const platsF = createMultiSelect({
-    id: "business.platforms",
+    id: "search.platforms",
     label: "Platforms",
-    options: platformOptions,
-    defaultSelected: platformOptions.map(o => o.value),
-    allowAll: true,
+    options: ALL_PLATFORM_OPTIONS,
+    defaultSelected: ALL_PLATFORM_OPTIONS.some(o => o.value === "Amazon") ? ["Amazon"] : ALL_PLATFORM_OPTIONS.slice(0, 1).map(o => o.value),
+    allowAll: false,
+    validate: (value, nextSet) => {
+      if (nextSet.size === 0) {
+        return "At least one platform must remain selected.";
+      }
+      return null;
+    },
   });
   bar.appendChild(platsF.el);
 
-  const levelF = createSegmented({
-    id: "business.level",
-    label: "View level",
+  // Branded / Generic — Weekly only.
+  const brandedF = createSegmented({
+    id: "search.branded",
+    label: "Keyword type",
     options: [
-      { value: "overall",    label: "Overall" },
-      { value: "category",   label: "Category" },
-      { value: "subcategory", label: "Sub-category" },
-      { value: "sku",        label: "SKU" },
+      { value: "both", label: "Both" },
+      { value: "branded", label: "Branded" },
+      { value: "generic", label: "Generic" },
     ],
-    defaultValue: "overall",
+    defaultValue: "both",
   });
-  bar.appendChild(levelF.el);
+  bar.appendChild(brandedF.el);
 
-  // Dimension area — swaps between a multi-select (cat/sub) and a <select> (SKU).
-  const dimWrap = document.createElement("div");
-  dimWrap.id = "business-dim-wrap";
-  dimWrap.style.display = "none";
-  bar.appendChild(dimWrap);
+  // "View by" — only meaningful when Amazon is the sole selected platform
+  // in Weekly view. Defaults to Rank (Amazon's traditional view) but the
+  // user can flip to Volume to surface keywords that have no rank.
+  // Visibility is managed in rerender().
+  const metricF = createSegmented({
+    id: "search.metric",
+    label: "View by",
+    options: [
+      { value: "rank",   label: "Rank" },
+      { value: "volume", label: "Volume" },
+    ],
+    defaultValue: "rank",
+  });
+  bar.appendChild(metricF.el);
 
-  // SKU <select> — only shown at SKU level.
-  const skuWrap = document.createElement("div");
-  skuWrap.className = "fl-group";
-  skuWrap.id = "business-sku-wrap";
-  skuWrap.innerHTML = `
-    <div class="fl-lbl" id="business-sku-label">SKU</div>
-    <select id="business-sku-select" class="fl-select"></select>
-  `;
-  skuWrap.style.display = "none";
-  bar.appendChild(skuWrap);
+  // Stash option lists so the metric toggle's onChange handler can swap them.
+  LocalState._allPlatformOptions  = ALL_PLATFORM_OPTIONS;
+  LocalState._rankPlatformOptions = RANK_PLATFORM_OPTIONS;
 
-  const toggleBtn = document.createElement("button");
-  toggleBtn.className = "fl-tbl-toggle";
-  toggleBtn.textContent = "Show all tables";
-  bar.appendChild(toggleBtn);
-  wireTableToggleAll(toggleBtn, document.getElementById("content-business"));
-
-  LocalState.filters = { dateF, granF, platsF, levelF };
-
+  // Wire change events.
+  LocalState.filters = { dateF, viewF, platsF, brandedF, metricF };
   syncFromFilters();
-
+  // If we're starting in Rank mode + Weekly, clamp the platforms picker now
+  // (in case persisted state has Volume-only platforms selected).
+  applyMetricModeToPicker(/* toastOnDrop */ false);
   dateF.onChange(() => { syncFromFilters(); rerender(); });
-  granF.onChange(() => { syncFromFilters(); rerender(); });
-  platsF.onChange(() => { syncFromFilters(); rebuildDimension(); rerender(); });
-  levelF.onChange(() => {
-    LocalState.dim = "__all__";
-    LocalState.dims = [];
-    syncFromFilters();
-    rebuildDimension();
-    rerender();
-  });
+  viewF.onChange(() => { syncFromFilters(); applyMetricModeToPicker(false); rerender(); });
+  platsF.onChange(() => { syncFromFilters(); rerender(); });
+  brandedF.onChange(() => { syncFromFilters(); rerender(); });
+  metricF.onChange(() => { syncFromFilters(); applyMetricModeToPicker(true); rerender(); });
+}
 
-  document.getElementById("business-sku-select").addEventListener("change", e => {
-    LocalState.dim = e.target.value;
-    rerender();
-  });
-
-  rebuildDimension();
+/**
+ * Make the Platforms picker reflect the current "View by" toggle state.
+ *   Rank mode  → show only rank-capable platforms
+ *   Volume mode → show all platforms
+ * If currently-selected platforms get filtered out (e.g., switching to Rank
+ * with Flipkart selected), they're dropped and a toast explains.
+ */
+function applyMetricModeToPicker(toastOnDrop) {
+  const { platsF, viewF, metricF } = LocalState.filters || {};
+  if (!platsF || !viewF || !metricF) return;
+  const isWeekly = viewF.getValue() === "weekly";
+  const rankMode = metricF.getValue() === "rank";
+  // In Daily view, the toggle is hidden — keep the full platform list.
+  const newOptions = (isWeekly && rankMode)
+    ? LocalState._rankPlatformOptions
+    : LocalState._allPlatformOptions;
+  const fallback = newOptions.some(o => o.value === "Amazon") ? ["Amazon"] : [];
+  const dropped = platsF.setOptions(newOptions, fallback);
+  // Sync LocalState since selection may have changed.
+  LocalState.platforms = platsF.getSelected();
+  if (toastOnDrop && dropped.length) {
+    const names = dropped.join(", ");
+    toast(`Hidden ${names} — no rank data available.`);
+  }
 }
 
 function syncFromFilters() {
-  const { dateF, granF, platsF, levelF } = LocalState.filters;
-  LocalState.range    = dateF.getRange();
-  LocalState.gran     = granF.getValue();
+  const { dateF, viewF, platsF, brandedF, metricF } = LocalState.filters;
+  LocalState.range = dateF.getRange();
+  LocalState.view = viewF.getValue();
   LocalState.platforms = platsF.getSelected();
-  LocalState.level    = levelF.getValue();
+  LocalState.branded = brandedF.getValue();
+  LocalState.metricMode = metricF.getValue();   // 'rank' or 'volume'
+  // Keyword-type filter is valid in both Weekly and Daily — daily rows
+  // carry a branded_bucket field enriched by the pipeline.
 }
 
 /* ---------------------------------------------------------------- *
- * Dimension widget — switches between multi-select (cat/sub) and <select> (SKU)
+ * Re-render everything that depends on filter state
  * ---------------------------------------------------------------- */
-function rebuildDimension() {
-  const level   = LocalState.level;
-  const dimWrap = document.getElementById("business-dim-wrap");
-  const skuWrap = document.getElementById("business-sku-wrap");
-
-  if (level === "overall") {
-    dimWrap.style.display = "none";
-    skuWrap.style.display = "none";
-    LocalState.dim  = "__all__";
-    LocalState.dims = [];
-    LocalState._dimMultiSelect = null;
-    return;
+/**
+ * Decide whether the chart should be in rank mode right now.
+ *
+ *   Weekly + user toggle = "rank" → rank mode. The Platforms picker is
+ *     already filtered to rank-capable platforms by
+ *     applyMetricModeToPicker(), so "all selected platforms are rank-
+ *     capable" is guaranteed in this state.
+ *   Daily: rank mode whenever Amazon is selected (Daily SFR has no volume
+ *     column — Amazon's daily values are ranks).
+ *
+ * Single source of truth so the various render + download paths agree.
+ */
+function currentRankMode() {
+  const isWeekly = LocalState.view === "weekly";
+  if (isWeekly) {
+    return LocalState.metricMode === "rank";
   }
-
-  if (level === "sku") {
-    dimWrap.style.display = "none";
-    skuWrap.style.display = "";
-    LocalState._dimMultiSelect = null;
-    refreshSkuDropdown();
-    return;
-  }
-
-  // Category or Sub-category — multi-select
-  skuWrap.style.display = "none";
-  dimWrap.style.display = "";
-  dimWrap.innerHTML = "";   // clear previous widget
-
-  const labelMap = { category: "Category", subcategory: "Sub-category" };
-  const field    = level === "category" ? "category" : "subcategory";
-  const platSet  = new Set(LocalState.platforms);
-
-  const dimSet = new Set();
-  for (const r of (LocalState.salesRows || [])) {
-    if (platSet.has(r.platform) && r[field]) dimSet.add(r[field]);
-  }
-  const opts = [...dimSet].sort().map(v => ({ value: v, label: v }));
-
-  const ms = createMultiSelect({
-    id: `business.dims.${level}`,
-    label: labelMap[level],
-    options: opts,
-    defaultSelected: opts.map(o => o.value),  // all selected initially
-    allowAll: true,
-    maxSelected: MULTI_DIM_LIMIT,
-  });
-
-  dimWrap.appendChild(ms.el);
-  LocalState._dimMultiSelect = ms;
-  LocalState.dims = ms.getSelected();
-
-  ms.onChange(sel => {
-    LocalState.dims = sel;
-    rerender();
-  });
+  // Daily: any Amazon selection → rank mode (Daily SFR has no volume column).
+  return LocalState.platforms.some(p => RANK_PLATFORMS.has(p));
 }
 
-function refreshSkuDropdown() {
-  const sel = document.getElementById("business-sku-select");
-  if (!sel) return;
-  const platSet = new Set(LocalState.platforms);
-  const skuSet = new Set();
-  for (const r of (LocalState.salesRows || [])) {
-    if (platSet.has(r.platform) && r.nh_sku) skuSet.add(r.nh_sku);
-  }
-  const opts = [...skuSet].sort().map(sku => ({ value: sku, display: skuDisplay(sku) }));
-  sel.innerHTML = [
-    `<option value="__all__">All SKUs (combined)</option>`,
-    ...opts.map(o => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.display)}</option>`),
-  ].join("");
-  if (LocalState.dim !== "__all__" && !opts.some(o => o.value === LocalState.dim)) {
-    LocalState.dim = "__all__";
-  }
-  sel.value = LocalState.dim;
-}
-
-/* ---------------------------------------------------------------- *
- * SKU → short_code lookup
- * ---------------------------------------------------------------- */
-function buildSkuLookup() {
-  const map = new Map();
-  for (const r of (State.data.weekly_catalogue || [])) {
-    if (r.nh_sku && r.short_code && !map.has(r.nh_sku)) map.set(r.nh_sku, r.short_code);
-  }
-  return map;
-}
-
-function skuDisplay(sku) {
-  const sc = LocalState.skuLookup?.get(sku);
-  return sc ? `${sc} (${sku})` : sku;
-}
-
-/* ---------------------------------------------------------------- *
- * Re-render
- * ---------------------------------------------------------------- */
 function rerender() {
-  const agg = computeAggregations();
-  LocalState._agg = agg;
-  for (const m of METRICS) renderMetricPanel(m, agg);
-  syncTableCollapseLabels(document.getElementById("content-business"));
+  const isWeekly = LocalState.view === "weekly";
+
+  // Toggle visibility: show in Weekly when at least one rank-capable
+  // platform exists in the data. Hide in Daily (single field per row).
+  const metricF = LocalState.filters?.metricF;
+  if (metricF) {
+    const anyRankCapable = (LocalState._rankPlatformOptions || []).length > 0;
+    metricF.el.style.display = (isWeekly && anyRankCapable) ? "" : "none";
+  }
+
+  const rankMode = currentRankMode();
+
+  // Mode notice — describes what the user is looking at.
+  const notice = document.getElementById("search-mode-notice");
+  if (rankMode) {
+    const ctx = isWeekly ? "Weekly" : "Amazon";
+    notice.innerHTML = `<strong>Rank mode (${ctx})</strong> — lower numbers are better. Movement arrows show rank changes. Only keywords inside the ranked set appear.`;
+    notice.hidden = false;
+  } else if (isWeekly && LocalState.platforms.length === 1) {
+    notice.innerHTML = `<strong>Volume mode</strong> — search volume per keyword on ${escapeHtml(LocalState.platforms[0])}.`;
+    notice.hidden = false;
+  } else if (LocalState.platforms.length > 1) {
+    notice.innerHTML = `<strong>Volume mode</strong> — searches summed across ${LocalState.platforms.length} platforms.`;
+    notice.hidden = false;
+  } else {
+    notice.hidden = true;
+  }
+  document.getElementById("search-mode-subtitle").textContent = rankMode
+    ? "— by Search Rank (latest period)"
+    : "— by Search Volume (latest period)";
+
+  // Compute aggregations.
+  const agg = computeAggregations({ rankMode });
+  LocalState._agg = agg;  // cached for downloads
+
+  renderTopTable(agg, rankMode);
+  renderTableMeta(agg);
+  renderKeywordPicker(agg);
+  renderTrend(agg, rankMode);
 }
 
 /* ---------------------------------------------------------------- *
  * Aggregations
  *
- * Multi-dim mode (category/subcategory with 2+ dims selected):
- *   agg.multiDim = true
- *   agg.dimKeys  = string[]     — the selected dim values
- *   agg.byDim    = Map<dim, periods[]>  — per-dim period arrays
- *   agg.periods  = combined period array (union of all dims, with combined totals)
- *
- * Single-dim / overall mode:
- *   agg.multiDim = false
- *   agg.periods  = periods[]
+ * Returns:
+ *   {
+ *     periods: string[]                // labels for chart x-axis ('Week23', '2026-06-15', etc.)
+ *     periodMeta: Map(label -> {start, end, range_display})
+ *     latestPeriod: string | null
+ *     prevPeriod: string | null
+ *     byKeyword: Map(kw -> {
+ *         keyword, category, subcategory,
+ *         periodValues: Map(label -> number|null),
+ *         latestValue, prevValue,
+ *         movementDiff, movementPct, improved,
+ *     })
+ *     keywordsSortedForLatest: string[]  // sort order at latest period
+ *   }
  * ---------------------------------------------------------------- */
-function computeAggregations() {
-  const { range, gran, platforms, level, dim, dims } = LocalState;
+function computeAggregations({ rankMode }) {
+  const { range, view, platforms, branded } = LocalState;
+
+  if (view === "weekly") return aggregateWeekly({ range, platforms, branded, rankMode });
+  return aggregateDaily({ range, platforms, branded, rankMode });
+}
+
+function aggregateWeekly({ range, platforms, branded, rankMode }) {
+  const weeks = State.data.weeks || [];
+  const allRows = State.data.weekly_sfr;
+  if (!Array.isArray(allRows)) return emptyAgg();
+
+  // Determine eligible week_nums: weeks fully inside [from, to].
+  const eligibleWeeks = weeks.filter(w => {
+    if (range.from && w.start < range.from) return false;
+    if (range.to   && w.end   > range.to)   return false;
+    return true;
+  });
+  const weekNumSet = new Set(eligibleWeeks.map(w => w.week_num));
+
+  const periodLabels = eligibleWeeks.map(w => w.label);  // 'Week23'
+  const periodMeta = new Map(eligibleWeeks.map(w => [w.label, w]));
+
+  // Filter rows: platform, week, branded.
   const platSet = new Set(platforms);
-  const spendAvailable = (level !== "sku");
+  const brandedFilter = branded;
+  const filtered = allRows.filter(r =>
+    platSet.has(r.platform) &&
+    weekNumSet.has(r.week_num) &&
+    (brandedFilter === "both" || (r.branded_bucket || "Generic").toLowerCase() === brandedFilter)
+  );
 
-  // Determine if we're in multi-dim mode.
-  const isMultiDim = (level === "category" || level === "subcategory") && dims.length >= 2;
-
-  if (isMultiDim) {
-    return computeMultiDimAgg({ range, gran, platSet, level, dims, spendAvailable });
+  // Group by keyword × week. Metric: rank (Amazon) → min; volume (others) → sum.
+  const byKeyword = new Map();
+  for (const r of filtered) {
+    let entry = byKeyword.get(r.search_query);
+    if (!entry) {
+      entry = {
+        keyword: r.search_query,
+        category: r.category,
+        subcategory: r.subcategory,
+        periodValues: new Map(),
+      };
+      byKeyword.set(r.search_query, entry);
+    }
+    const weekLabel = `Week${r.week_num}`;
+    const existing = entry.periodValues.get(weekLabel);
+    const metric = rankMode ? r.rank : r.volume;
+    if (metric == null) continue;
+    if (existing == null) entry.periodValues.set(weekLabel, metric);
+    else if (rankMode) entry.periodValues.set(weekLabel, Math.min(existing, metric));
+    else entry.periodValues.set(weekLabel, existing + metric);
   }
 
-  // Single-dim / overall / SKU mode (original logic).
-  return computeSingleAgg({ range, gran, platSet, level, dim, dims, spendAvailable });
+  return finishAgg(byKeyword, periodLabels, periodMeta, rankMode);
 }
 
-function computeSingleAgg({ range, gran, platSet, level, dim, dims, spendAvailable }) {
-  // The effective single-dim value: for cat/sub with 0 or 1 dim selected
-  // we filter to that dim; for "all" we aggregate everything.
-  const effDim = (level === "category" || level === "subcategory")
-    ? (dims.length === 1 ? dims[0] : "__all__")
-    : dim;
+function aggregateDaily({ range, platforms, branded, rankMode }) {
+  const allRows = State.data.daily_sfr;
+  if (!Array.isArray(allRows)) return emptyAgg();
 
-  const sales = (LocalState.salesRows || []).filter(r => {
+  const platSet = new Set(platforms);
+  const brandedFilter = branded;
+  const filtered = allRows.filter(r => {
     if (!platSet.has(r.platform)) return false;
     if (range.from && r.date < range.from) return false;
     if (range.to   && r.date > range.to)   return false;
-    if (level === "category"    && effDim !== "__all__" && r.category    !== effDim) return false;
-    if (level === "subcategory" && effDim !== "__all__" && r.subcategory !== effDim) return false;
-    if (level === "sku"         && dim    !== "__all__" && r.nh_sku      !== dim)    return false;
+    if (brandedFilter !== "both" &&
+        (r.branded_bucket || "Generic").toLowerCase() !== brandedFilter) return false;
     return true;
   });
 
-  const spendRows = spendAvailable ? (State.data.bcg_spend || []).filter(r => {
-    if (!platSet.has(r.platform)) return false;
-    if (range.from && r.date < range.from) return false;
-    if (range.to   && r.date > range.to)   return false;
-    if (level === "category"    && effDim !== "__all__" && r.category    !== effDim) return false;
-    if (level === "subcategory" && effDim !== "__all__" && r.subcategory !== effDim) return false;
-    return true;
-  }) : [];
+  // x-axis is distinct dates in ascending order.
+  const dateSet = new Set();
+  for (const r of filtered) dateSet.add(r.date);
+  const periodLabels = [...dateSet].sort();
+  const periodMeta = new Map(periodLabels.map(d => [d, { range_display: d }]));
 
-  const periodList = enumeratePeriods(range.from, range.to, gran);
-  const periodMap  = new Map(periodList.map(p => [p.key, {
-    key: p.key, label: p.label,
-    page_views: null, units: null, revenue: null,
-    spend: null, ad_sales: null, roas: null,
-    hasSales: false, hasSpend: false,
-  }]));
-
-  for (const r of sales) {
-    const key = bucketKey(r.date, gran);
-    const e = periodMap.get(key);
-    if (!e) continue;
-    if (!e.hasSales) { e.page_views = 0; e.units = 0; e.revenue = 0; e.hasSales = true; }
-    e.page_views += +r.glance_views || 0;
-    e.units      += +r.gross_units  || 0;
-    e.revenue    += +r.revenue      || 0;
-  }
-  for (const r of spendRows) {
-    const key = bucketKey(r.date, gran);
-    const e = periodMap.get(key);
-    if (!e) continue;
-    if (!e.hasSpend) { e.spend = 0; e.ad_sales = 0; e.hasSpend = true; }
-    e.spend    += +r.spend || 0;
-    e.ad_sales += +r.sales || 0;
-  }
-
-  const periods = periodList.map(p => {
-    const e = periodMap.get(p.key);
-    if (e.hasSpend && e.spend > 0) e.roas = e.ad_sales / e.spend;
-    else if (e.hasSpend && e.spend === 0) e.roas = null;
-    return e;
-  });
-
-  const totals = { page_views: 0, units: 0, revenue: 0, spend: 0, ad_sales: 0 };
-  for (const p of periods) {
-    if (p.hasSales) {
-      totals.page_views += p.page_views;
-      totals.units      += p.units;
-      totals.revenue    += p.revenue;
+  const byKeyword = new Map();
+  for (const r of filtered) {
+    let entry = byKeyword.get(r.keyword);
+    if (!entry) {
+      entry = {
+        keyword: r.keyword,
+        category: r.category,
+        subcategory: r.subcategory,
+        periodValues: new Map(),
+      };
+      byKeyword.set(r.keyword, entry);
     }
-    if (p.hasSpend) { totals.spend += p.spend; totals.ad_sales += p.ad_sales; }
+    if (r.rank == null) continue;
+    const existing = entry.periodValues.get(r.date);
+    if (existing == null) entry.periodValues.set(r.date, r.rank);
+    else if (rankMode) entry.periodValues.set(r.date, Math.min(existing, r.rank));
+    else entry.periodValues.set(r.date, existing + r.rank);
   }
 
-  return { periods, multiDim: false, spendAvailable, totals };
+  return finishAgg(byKeyword, periodLabels, periodMeta, rankMode);
 }
 
-function computeMultiDimAgg({ range, gran, platSet, level, dims, spendAvailable }) {
-  const field = level === "category" ? "category" : "subcategory";
-  const periodList = enumeratePeriods(range.from, range.to, gran);
+function finishAgg(byKeyword, periodLabels, periodMeta, rankMode) {
+  // "Latest" = most recent period in range that has at least one data point.
+  // If that period is mid-range, the table shows the 5 leading up to it.
+  const periodsWithData = periodLabels.filter(p =>
+    [...byKeyword.values()].some(e => e.periodValues.get(p) != null)
+  );
+  const latestPeriod = periodsWithData.length
+    ? periodsWithData[periodsWithData.length - 1]
+    : null;
+  // "Previous period" = calendar period immediately before latest (regardless
+  // of whether that period had data).
+  const latestIdx = latestPeriod ? periodLabels.indexOf(latestPeriod) : -1;
+  const prevPeriod = latestIdx > 0 ? periodLabels[latestIdx - 1] : null;
 
-  // Per-dim period maps.
-  const byDim = new Map();
-  for (const d of dims) {
-    byDim.set(d, new Map(periodList.map(p => [p.key, {
-      key: p.key, label: p.label,
-      page_views: null, units: null, revenue: null,
-      spend: null, ad_sales: null, roas: null,
-      hasSales: false, hasSpend: false,
-    }])));
-  }
+  // The visible window for table columns: last 5 periods ending at latest.
+  const visibleEnd = latestIdx >= 0 ? latestIdx + 1 : periodLabels.length;
+  const visiblePeriods = periodLabels.slice(Math.max(0, visibleEnd - 5), visibleEnd);
 
-  // Also a combined map.
-  const combinedMap = new Map(periodList.map(p => [p.key, {
-    key: p.key, label: p.label,
-    page_views: null, units: null, revenue: null,
-    spend: null, ad_sales: null, roas: null,
-    hasSales: false, hasSpend: false,
-  }]));
-
-  const dimSet = new Set(dims);
-
-  for (const r of (LocalState.salesRows || [])) {
-    if (!platSet.has(r.platform)) continue;
-    if (range.from && r.date < range.from) continue;
-    if (range.to   && r.date > range.to)   continue;
-    const dv = r[field];
-    if (!dimSet.has(dv)) continue;
-    const key = bucketKey(r.date, gran);
-    for (const [dimVal, pm] of [[dv, byDim.get(dv)], ["__combined__", combinedMap]]) {
-      if (!pm) continue;
-      const e = pm.get(key);
-      if (!e) continue;
-      if (!e.hasSales) { e.page_views = 0; e.units = 0; e.revenue = 0; e.hasSales = true; }
-      e.page_views += +r.glance_views || 0;
-      e.units      += +r.gross_units  || 0;
-      e.revenue    += +r.revenue      || 0;
-    }
-  }
-
-  if (spendAvailable) {
-    for (const r of (State.data.bcg_spend || [])) {
-      if (!platSet.has(r.platform)) continue;
-      if (range.from && r.date < range.from) continue;
-      if (range.to   && r.date > range.to)   continue;
-      const dv = r[field];
-      if (!dimSet.has(dv)) continue;
-      const key = bucketKey(r.date, gran);
-      for (const [dimVal, pm] of [[dv, byDim.get(dv)], ["__combined__", combinedMap]]) {
-        if (!pm) continue;
-        const e = pm.get(key);
-        if (!e) continue;
-        if (!e.hasSpend) { e.spend = 0; e.ad_sales = 0; e.hasSpend = true; }
-        e.spend    += +r.spend || 0;
-        e.ad_sales += +r.sales || 0;
+  // Compute latest/prev and movement per keyword.
+  for (const entry of byKeyword.values()) {
+    entry.latestValue = latestPeriod ? entry.periodValues.get(latestPeriod) ?? null : null;
+    entry.prevValue   = prevPeriod   ? entry.periodValues.get(prevPeriod)   ?? null : null;
+    if (entry.latestValue != null && entry.prevValue != null) {
+      entry.movementDiff = entry.latestValue - entry.prevValue;
+      if (rankMode) {
+        // Lower is better; improvement = negative diff.
+        entry.improved = entry.movementDiff < 0;
+        entry.movementPct = null;
+      } else {
+        entry.improved = entry.movementDiff > 0;
+        entry.movementPct = entry.prevValue !== 0
+          ? (entry.movementDiff / Math.abs(entry.prevValue)) * 100
+          : null;
       }
+    } else {
+      entry.movementDiff = null;
+      entry.movementPct = null;
+      entry.improved = null;
     }
   }
 
-  // Finalize ROAS for each dim and combined.
-  const finalize = (pm) => periodList.map(p => {
-    const e = pm.get(p.key);
-    if (e.hasSpend && e.spend > 0) e.roas = e.ad_sales / e.spend;
-    return e;
+  // Sort keywords by latest period value (ascending for rank, descending for volume).
+  // Keywords missing in latest period go last.
+  const arr = [...byKeyword.values()];
+  arr.sort((a, b) => {
+    const av = a.latestValue, bv = b.latestValue;
+    if (av == null && bv == null) return a.keyword.localeCompare(b.keyword);
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return rankMode ? (av - bv) : (bv - av);
   });
 
-  const byDimPeriods = new Map();
-  for (const [d, pm] of byDim) byDimPeriods.set(d, finalize(pm));
-  const combinedPeriods = finalize(combinedMap);
-
-  // Flat periods array = combined (for KPI / meta display).
   return {
-    multiDim: true,
-    dimKeys: dims,
-    byDimPeriods,
-    combinedPeriods,
-    periods: combinedPeriods,
-    spendAvailable,
-    totals: { page_views: 0, units: 0, revenue: 0, spend: 0, ad_sales: 0 },
+    periods: periodLabels,
+    visiblePeriods,
+    periodMeta,
+    latestPeriod, prevPeriod,
+    byKeyword,
+    keywordsSortedForLatest: arr.map(e => e.keyword),
+    sortedEntries: arr,
+  };
+}
+
+function emptyAgg() {
+  return {
+    periods: [], visiblePeriods: [], periodMeta: new Map(),
+    latestPeriod: null, prevPeriod: null,
+    byKeyword: new Map(),
+    keywordsSortedForLatest: [], sortedEntries: [],
   };
 }
 
 /* ---------------------------------------------------------------- *
- * Per-metric panel render
+ * Top-10 table
  * ---------------------------------------------------------------- */
-function renderMetricPanel(metric, agg) {
-  const section  = document.querySelector(`.section-card[data-metric="${metric.key}"]`);
-  const canvas   = document.getElementById(`bus-${metric.key}-canvas`);
-  const thead    = document.querySelector(`#bus-${metric.key}-tbl thead`);
-  const tbody    = document.querySelector(`#bus-${metric.key}-tbl tbody`);
-  const empty    = document.getElementById(`bus-${metric.key}-empty`);
-  const kpiEl    = document.getElementById(`bus-${metric.key}-kpi`);
-  const metaEl   = document.getElementById(`bus-${metric.key}-meta`);
+function renderTopTable(agg, rankMode) {
+  const thead = document.querySelector("#search-top-tbl thead");
+  const tbody = document.querySelector("#search-top-tbl tbody");
 
-  // ROAS and Spend at SKU level → N/A
-  if (metric.skuOk === false && !agg.spendAvailable) {
-    destroyChart(canvas);
-    canvas.parentElement.style.display = "none";
-    section.querySelector(".tbl-wrap").style.display = "none";
-    empty.hidden = false;
-    const reason = metric.key === "roas"
-      ? "ROAS isn't available at SKU level (spend is recorded at category granularity)."
-      : "Spend isn't available at SKU level (spend is recorded at category granularity).<br>Switch to a higher view level.";
-    empty.innerHTML = `<strong>Not available at SKU level.</strong><br>${reason}`;
-    kpiEl.textContent = ""; metaEl.textContent = "";
-    section.querySelectorAll("[data-dl]").forEach(b => b.disabled = true);
+  if (!agg.sortedEntries.length || !agg.latestPeriod) {
+    thead.innerHTML = "";
+    tbody.innerHTML = `<tr><td class="empty-state">No keyword data in the selected range. Adjust filters above.</td></tr>`;
     return;
   }
 
-  canvas.parentElement.style.display = "";
-  section.querySelector(".tbl-wrap").style.display = "";
-  empty.hidden = true;
-  section.querySelectorAll("[data-dl]").forEach(b => b.disabled = false);
+  const showPeriods = agg.visiblePeriods;        // 5 periods ending at latest-with-data
+  const isWeekly = (LocalState.view === "weekly");
 
-  if (agg.multiDim) {
-    renderMultiDimPanel(metric, agg, canvas, thead, tbody, kpiEl, metaEl);
-  } else {
-    renderSingleDimPanel(metric, agg, canvas, thead, tbody, kpiEl, metaEl);
+  let head = `<tr><th class="rank">#</th><th>Keyword</th><th>Category</th>`;
+  for (const p of showPeriods) {
+    const isLatest = (p === agg.latestPeriod);
+    const meta = agg.periodMeta.get(p);
+    const tip = meta?.range_display ? ` title="${escapeHtml(meta.range_display)}"` : "";
+    const label = isLatest ? `${p} (latest)` : p;
+    head += `<th class="num"${tip}>${escapeHtml(label)}</th>`;
   }
-}
-
-/* ── single-dim (original behaviour) ── */
-function renderSingleDimPanel(metric, agg, canvas, thead, tbody, kpiEl, metaEl) {
-  const { periods } = agg;
-  const values = periods.map(p => {
-    if (metric.key === "spend")    return p.hasSpend ? p.spend    : null;
-    if (metric.key === "roas")     return p.hasSpend ? p.roas     : null;
-    return p.hasSales ? p[metric.key] : null;
-  });
-  const labels = periods.map(p => p.label);
-
-  const valIdx   = lastIndexWithData(values);
-  const latestVal = valIdx >= 0 ? values[valIdx] : null;
-  const prevIdx  = findPrevWithData(values, valIdx);
-  const prevVal  = prevIdx >= 0 ? values[prevIdx] : null;
-  const delta    = pctChange(latestVal, prevVal);
-
-  if (latestVal == null) {
-    kpiEl.innerHTML = `<span style="color:var(--brand-muted-2)">No data in range</span>`;
-  } else {
-    const pn = ({ daily:"day", weekly:"week", monthly:"month" })[LocalState.gran] || "period";
-    const dp = delta == null
-      ? `<span style="color:var(--brand-muted-2); margin-left:8px;">no prior ${pn}</span>`
-      : `<span class="${delta > 0 ? "delta-up" : delta < 0 ? "delta-down" : ""}" style="margin-left:8px;">${
-            delta > 0 ? "▲" : delta < 0 ? "▼" : "→"} ${Math.abs(delta).toFixed(1)}%</span>`;
-    kpiEl.innerHTML = `<span class="kpi-val">${metric.fmt(latestVal)}</span>${dp}`;
-  }
-  metaEl.textContent = `${periods.length} ${pluralize(LocalState.gran, periods.length)}`;
-
-  renderLineChart(canvas, {
-    labels,
-    series: [{ label: metric.label, data: values }],
-    yFormat: metric.yFormat,
-    yTitle:  metric.yTitle,
-  });
-
-  let head = `<tr><th>Period</th><th class="num">${escapeHtml(metric.label)}</th><th class="num">Δ vs prev</th></tr>`;
+  head += `<th class="num">Movement</th></tr>`;
   thead.innerHTML = head;
 
-  const rowsHTML = [];
-  for (let i = periods.length - 1; i >= 0; i--) {
-    const p = periods[i];
-    const v = values[i];
-    const prev = i > 0 ? values[i - 1] : null;
-    const dlt = pctChange(v, prev);
-    rowsHTML.push(`<tr>
-      <td><strong>${escapeHtml(p.label)}</strong></td>
-      <td class="num mono">${v == null ? "—" : metric.fmt(v)}</td>
-      <td class="num">${dlt == null ? `<span class="pill pill--flat">—</span>` : deltaPill(dlt)}</td>
-    </tr>`);
-  }
-  tbody.innerHTML = rowsHTML.join("") ||
-    `<tr><td colspan="3" class="empty-state">No periods in range.</td></tr>`;
+  const top10 = agg.sortedEntries.slice(0, 10);
+  tbody.innerHTML = top10.map((e, i) => rowHtml(e, i + 1, showPeriods, rankMode)).join("");
 }
 
-/* ── multi-dim (2+ categories/subcategories) ── */
-function renderMultiDimPanel(metric, agg, canvas, thead, tbody, kpiEl, metaEl) {
-  const { dimKeys, byDimPeriods, combinedPeriods } = agg;
-  const labels = combinedPeriods.map(p => p.label);
-
-  // Build one data array per dim + one combined.
-  const getVal = (p) => {
-    if (metric.key === "spend") return p.hasSpend ? p.spend : null;
-    if (metric.key === "roas")  return p.hasSpend ? p.roas  : null;
-    return p.hasSales ? p[metric.key] : null;
-  };
-
-  const dimSeries = dimKeys.map((d, i) => ({
-    label: d,
-    data:  (byDimPeriods.get(d) || []).map(getVal),
-    color: PALETTE[i % PALETTE.length],
-  }));
-  const combinedValues = combinedPeriods.map(getVal);
-  const combinedSeries = {
-    label: "Combined",
-    data:  combinedValues,
-    color: "#1F2A22",   // deep forest for the combined line
-  };
-
-  // KPI from the combined line.
-  const valIdx    = lastIndexWithData(combinedValues);
-  const latestVal = valIdx >= 0 ? combinedValues[valIdx] : null;
-  const prevIdx   = findPrevWithData(combinedValues, valIdx);
-  const prevVal   = prevIdx >= 0 ? combinedValues[prevIdx] : null;
-  const delta     = pctChange(latestVal, prevVal);
-
-  if (latestVal == null) {
-    kpiEl.innerHTML = `<span style="color:var(--brand-muted-2)">No data in range</span>`;
-  } else {
-    const pn = ({ daily:"day", weekly:"week", monthly:"month" })[LocalState.gran] || "period";
-    const dp = delta == null
-      ? `<span style="color:var(--brand-muted-2); margin-left:8px;">no prior ${pn}</span>`
-      : `<span class="${delta > 0 ? "delta-up" : delta < 0 ? "delta-down" : ""}" style="margin-left:8px;">${
-            delta > 0 ? "▲" : delta < 0 ? "▼" : "→"} ${Math.abs(delta).toFixed(1)}%</span>`;
-    kpiEl.innerHTML = `<span class="kpi-val">${metric.fmt(latestVal)}</span>${dp}`;
+function rowHtml(entry, rank, showPeriods, rankMode) {
+  let row = `<td class="rank">${rank}</td>`;
+  row += `<td class="kw-cell">${escapeHtml(entry.keyword || "—")}</td>`;
+  row += `<td class="cat-cell">${escapeHtml(entry.category || "—")}</td>`;
+  for (const p of showPeriods) {
+    const v = entry.periodValues.get(p);
+    row += `<td class="num mono">${v == null ? "—" : fmtInt(v)}</td>`;
   }
-  metaEl.textContent =
-    `${combinedPeriods.length} ${pluralize(LocalState.gran, combinedPeriods.length)} · ${dimKeys.length} ${LocalState.level === "category" ? "categories" : "sub-categories"}`;
+  row += `<td class="num">${movementPill(entry, rankMode)}</td>`;
+  return `<tr>${row}</tr>`;
+}
 
-  // Chart: individual dim lines + combined (dashed, prominent).
-  // Build datasets directly so we can set dash style on combined.
-  destroyChart(canvas);
-  if (typeof window.Chart !== "undefined") {
-    const allSeries = [...dimSeries, combinedSeries];
-    const datasets = allSeries.map((s, i) => {
-      const isCombined = (s.label === "Combined");
-      return {
-        label: s.label,
-        data:  s.data,
-        borderColor: s.color,
-        backgroundColor: s.color + "22",
-        borderWidth: isCombined ? 2.8 : 2,
-        borderDash: isCombined ? [6, 3] : [],
-        tension: 0.3,
-        pointRadius: 3,
-        pointHoverRadius: 5,
-        pointBackgroundColor: s.color,
-        pointBorderColor: s.color,
-        fill: false,
-        spanGaps: true,
-      };
-    });
-
-    // Tick / value formatters (duplicated from charts.js for the direct Chart() call).
-    const tickFns = {
-      int:  v => { const a = Math.abs(v); return a >= 1e7 ? `${(v/1e7).toFixed(1)}Cr` : a >= 1e5 ? `${(v/1e5).toFixed(1)}L` : a >= 1000 ? `${(v/1000).toFixed(1)}K` : String(v); },
-      inr:  v => { const a = Math.abs(v); const s = v < 0 ? "-" : ""; return a >= 1e7 ? `${s}₹${(a/1e7).toFixed(1)}Cr` : a >= 1e5 ? `${s}₹${(a/1e5).toFixed(1)}L` : a >= 1000 ? `${s}₹${(a/1000).toFixed(1)}K` : `${s}₹${a}`; },
-      roas: v => `${Number(v).toFixed(1)}x`,
-      pct:  v => `${Number(v).toFixed(0)}%`,
-    };
-    const valFns = {
-      int:  v => v == null ? "—" : Number(v).toLocaleString("en-IN"),
-      inr:  fmtINR,
-      roas: fmtROAS,
-      pct:  v => v == null ? "—" : `${Number(v).toFixed(2)}%`,
-    };
-    const tickFn = tickFns[metric.yFormat] || tickFns.int;
-    const valFn  = valFns[metric.yFormat]  || valFns.int;
-
-    new Chart(canvas, {
-      type: "line",
-      data: { labels, datasets },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { mode: "index", intersect: false },
-        plugins: {
-          legend: {
-            position: "top", align: "end",
-            labels: { boxWidth: 8, boxHeight: 8, padding: 14,
-                      font: { size: 12, weight: 600 }, usePointStyle: true },
-          },
-          tooltip: {
-            backgroundColor: "rgba(31,42,34,0.95)",
-            titleColor: "#fff", bodyColor: "#fff",
-            padding: 10, cornerRadius: 8, displayColors: true,
-            boxPadding: 4, boxWidth: 6, boxHeight: 6,
-            callbacks: {
-              label(ctx) {
-                const v = ctx.parsed.y;
-                return `${ctx.dataset.label}: ${v == null ? "—" : valFn(v)}`;
-              },
-            },
-          },
-        },
-        scales: {
-          x: { grid: { display: false },
-               ticks: { maxRotation: 0, autoSkip: true, autoSkipPadding: 12, font: { size: 11 } } },
-          y: { beginAtZero: true, grid: { color: "rgba(31,42,34,0.06)" },
-               ticks: { font: { size: 11 }, callback: tickFn },
-               title: metric.yTitle ? { display: true, text: metric.yTitle,
-                        font: { size: 11, weight: 600 }, color: "#7A7268" } : undefined },
-        },
-      },
-    });
+function movementPill(e, rankMode) {
+  if (e.movementDiff == null) return `<span class="pill pill--flat">—</span>`;
+  if (e.movementDiff === 0)   return `<span class="pill pill--flat">→ 0</span>`;
+  const cls = e.improved ? "pill--up" : "pill--down";
+  const sign = e.improved ? "↑" : "↓";
+  if (rankMode) {
+    return `<span class="pill ${cls}">${sign} ${Math.abs(e.movementDiff)}</span>`;
   }
+  const pctStr = e.movementPct == null ? "" : ` (${e.movementPct > 0 ? "+" : ""}${e.movementPct.toFixed(1)}%)`;
+  return `<span class="pill ${cls}">${sign} ${fmtInt(Math.abs(e.movementDiff))}${pctStr}</span>`;
+}
 
-  // Table: period rows × (dim1, dim2, …, Combined) columns.
-  thead.innerHTML = `<tr>
-    <th>Period</th>
-    ${dimKeys.map(d => `<th class="num">${escapeHtml(d)}</th>`).join("")}
-    <th class="num"><strong>Combined</strong></th>
-    <th class="num">Δ Combined</th>
-  </tr>`;
-
-  const rowsHTML = [];
-  for (let i = combinedPeriods.length - 1; i >= 0; i--) {
-    const p = combinedPeriods[i];
-    const cVal = combinedValues[i];
-    const cPrev = i > 0 ? combinedValues[i - 1] : null;
-    const dlt = pctChange(cVal, cPrev);
-    const dimCells = dimKeys.map(d => {
-      const v = getVal((byDimPeriods.get(d) || [])[i] || {});
-      return `<td class="num mono">${v == null ? "—" : metric.fmt(v)}</td>`;
-    }).join("");
-    rowsHTML.push(`<tr>
-      <td><strong>${escapeHtml(p.label)}</strong></td>
-      ${dimCells}
-      <td class="num mono"><strong>${cVal == null ? "—" : metric.fmt(cVal)}</strong></td>
-      <td class="num">${dlt == null ? `<span class="pill pill--flat">—</span>` : deltaPill(dlt)}</td>
-    </tr>`);
-  }
-  tbody.innerHTML = rowsHTML.join("") ||
-    `<tr><td colspan="${dimKeys.length + 3}" class="empty-state">No periods in range.</td></tr>`;
+function renderTableMeta(agg) {
+  const el = document.getElementById("search-table-meta");
+  if (!el) return;
+  if (!agg.latestPeriod) { el.textContent = ""; return; }
+  const meta = agg.periodMeta.get(agg.latestPeriod);
+  const range = meta?.range_display ? ` · ${meta.range_display}` : "";
+  el.textContent = `${agg.periods.length} period(s) · Latest: ${agg.latestPeriod}${range}`;
 }
 
 /* ---------------------------------------------------------------- *
- * Overlay (used during initial sales.json load)
+ * Keyword picker for trend chart
  * ---------------------------------------------------------------- */
-function showOverlay(root, msg, isError = false) {
-  const o = root.querySelector("#bus-overlay");
-  const m = root.querySelector("#bus-overlay-msg");
-  if (!o) return;
-  o.hidden = false;
-  m.textContent = msg;
-  m.style.color = isError ? "var(--down)" : "var(--brand-muted)";
-  o.querySelector(".boot-spinner").style.display = isError ? "none" : "";
+let _keywordPicker = null;
+
+function renderKeywordPicker(agg) {
+  const slot = document.getElementById("search-keyword-picker-slot");
+  if (!slot) return;
+
+  const options = agg.keywordsSortedForLatest.map(k => ({ value: k, label: k }));
+
+  // Default selection: top 5 keywords from the table on first build.
+  const defaultSelected = agg.keywordsSortedForLatest.slice(0, 5);
+
+  // Rebuild the picker when the option set has materially changed.
+  // For simplicity, rebuild every render — it's a tiny widget.
+  slot.innerHTML = "";
+  _keywordPicker = createMultiSelect({
+    id: "search.keywords",
+    label: "",   // label is shown by the inline span outside
+    options,
+    defaultSelected,
+    allowAll: false,
+    maxSelected: KEYWORD_TREND_LIMIT,
+    searchable: true,
+    placeholder: "Pick keywords…",
+  });
+  // Trim the label group so it inlines flush.
+  _keywordPicker.el.querySelector(".fl-lbl")?.remove();
+  slot.appendChild(_keywordPicker.el);
+
+  // Honor saved selection but clamp to current options.
+  const sel = _keywordPicker.getSelected().filter(k => options.find(o => o.value === k));
+  if (sel.length === 0 && defaultSelected.length) {
+    _keywordPicker.setSelected(defaultSelected);
+  }
+  LocalState.selectedKeywords = _keywordPicker.getSelected();
+
+  _keywordPicker.onChange(sel => {
+    LocalState.selectedKeywords = sel;
+    renderTrend(LocalState._agg, currentRankMode());
+  });
 }
-function hideOverlay() {
-  const o = document.getElementById("bus-overlay");
-  if (o) o.hidden = true;
+
+/* ---------------------------------------------------------------- *
+ * Trend chart
+ * ---------------------------------------------------------------- */
+function renderTrend(agg, rankMode) {
+  const canvas = document.getElementById("search-trend-canvas");
+  const legendEl = document.getElementById("search-trend-legend");
+  if (!canvas) return;
+  if (!agg.periods.length || LocalState.selectedKeywords.length === 0) {
+    destroyChart(canvas);
+    if (legendEl) legendEl.innerHTML = "";
+    return;
+  }
+  const series = LocalState.selectedKeywords
+    .slice(0, KEYWORD_TREND_LIMIT)
+    .map(kw => {
+      const entry = agg.byKeyword.get(kw);
+      if (!entry) return null;
+      const data = agg.periods.map(p => entry.periodValues.get(p) ?? null);
+      return { label: kw, data };
+    })
+    .filter(Boolean);
+
+  const chart = renderLineChart(canvas, {
+    labels: agg.periods,
+    series,
+    yReverse: false,
+    rankMode,
+    yFormat: "int",
+    yTitle: rankMode ? "Search rank (lower = better)" : "Search volume",
+    hideLegend: true,
+  });
+  renderSideLegend(legendEl, chart);
+}
+
+/* ---------------------------------------------------------------- *
+ * Full-list modal
+ * ---------------------------------------------------------------- */
+function openModal() {
+  const agg = LocalState._agg;
+  const rankMode = currentRankMode();
+  if (!agg || !agg.latestPeriod) {
+    toast("No data to show.");
+    return;
+  }
+  const thead = document.querySelector("#search-full-tbl thead");
+  const tbody = document.querySelector("#search-full-tbl tbody");
+  const showPeriods = agg.visiblePeriods;
+
+  let head = `<tr><th class="rank">#</th><th>Keyword</th><th>Category</th>`;
+  for (const p of showPeriods) {
+    const isLatest = (p === agg.latestPeriod);
+    const meta = agg.periodMeta.get(p);
+    const tip = meta?.range_display ? ` title="${escapeHtml(meta.range_display)}"` : "";
+    head += `<th class="num"${tip}>${escapeHtml(isLatest ? p + " (latest)" : p)}</th>`;
+  }
+  head += `<th class="num">Movement</th></tr>`;
+  thead.innerHTML = head;
+
+  tbody.innerHTML = agg.sortedEntries
+    .map((e, i) => rowHtml(e, i + 1, showPeriods, rankMode))
+    .join("");
+
+  document.getElementById("search-modal").hidden = false;
+}
+function closeModal() {
+  document.getElementById("search-modal").hidden = true;
 }
 
 /* ---------------------------------------------------------------- *
  * Downloads
  * ---------------------------------------------------------------- */
-function describeContext() {
-  const { level, dim, dims } = LocalState;
-  let dimDesc;
-  if (level === "overall") dimDesc = "All combined";
-  else if (level === "sku") dimDesc = dim === "__all__" ? "All SKUs combined" : skuDisplay(dim);
-  else dimDesc = dims.length === 0 ? "All combined"
-    : dims.length === 1 ? dims[0]
-    : `${dims.length} selected: ${dims.join(", ")}`;
+function describeContext(rankMode) {
   return {
-    "Tab": "Business",
-    "Granularity": LocalState.gran,
+    "Tab": "Search Movement",
+    "View": LocalState.view === "weekly" ? "Weekly" : "Daily",
+    "Mode": rankMode ? "Rank (Amazon, lower = better)" : "Volume (higher = better)",
     "Date range": `${LocalState.range.from || "—"} to ${LocalState.range.to || "—"}`,
     "Platforms": LocalState.platforms,
-    "View level": level,
-    "Dimension": dimDesc,
+    "Keyword type filter": LocalState.branded,
     "Generated at": new Date().toISOString(),
   };
 }
 
-function downloadMetric(metricKey, kind) {
-  const metric = METRICS.find(m => m.key === metricKey);
+function topTableColumnsAndRows(limit) {
   const agg = LocalState._agg;
-  if (!metric || !agg) return;
-  if (!agg.spendAvailable && metric.skuOk === false) {
-    toast(`${metric.label} isn't available at SKU level.`);
-    return;
-  }
-
-  const fname = `nat-habit_business-${metricKey.replace("_", "-")}_${tsForFilename()}`;
-
-  if (agg.multiDim) {
-    // Multi-dim table: period + per-dim + combined columns.
-    const { dimKeys, byDimPeriods, combinedPeriods } = agg;
-    const getVal = (p) => {
-      if (metricKey === "spend") return p.hasSpend ? p.spend : null;
-      if (metricKey === "roas")  return p.hasSpend ? p.roas  : null;
-      return p.hasSales ? p[metricKey] : null;
-    };
-    const cols = [
-      { key: "period", label: "Period" },
-      ...dimKeys.map(d => ({ key: `dim_${d}`, label: d })),
-      { key: "combined", label: "Combined" },
-      { key: "delta", label: "Δ Combined (%)" },
-    ];
-    const combinedValues = combinedPeriods.map(getVal);
-    const rows = [];
-    for (let i = combinedPeriods.length - 1; i >= 0; i--) {
-      const p = combinedPeriods[i];
-      const cVal  = combinedValues[i];
-      const cPrev = i > 0 ? combinedValues[i - 1] : null;
-      const dlt   = pctChange(cVal, cPrev);
-      const row   = { period: p.label, combined: cVal ?? "", delta: dlt == null ? "" : Number(dlt.toFixed(2)) };
-      for (const d of dimKeys) {
-        const dv = getVal((byDimPeriods.get(d) || [])[i] || {});
-        row[`dim_${d}`] = dv ?? "";
-      }
-      rows.push(row);
-    }
-    if (!rows.length) { toast("Nothing to download."); return; }
-    if (kind === "csv") return downloadCSV(`${fname}.csv`, cols, rows);
-    return downloadXLSX(`${fname}.xlsx`, [
-      { name: metric.label, columns: cols, rows },
-      rawRowsSheet(metricKey),
-      filterContextSheet("Filter context", describeContext()),
-    ]);
-  }
-
-  // Single-dim download (original).
-  const values = agg.periods.map(p => {
-    if (metricKey === "spend") return p.hasSpend ? p.spend : null;
-    if (metricKey === "roas")  return p.hasSpend ? p.roas  : null;
-    return p.hasSales ? p[metricKey] : null;
-  });
-  const cols = [
-    { key: "period", label: "Period" },
-    { key: "value",  label: metric.label },
-    { key: "delta",  label: "Δ vs prev (%)" },
+  if (!agg) return { columns: [], rows: [] };
+  const showPeriods = agg.visiblePeriods;
+  const columns = [
+    { key: "rank", label: "#" },
+    { key: "keyword", label: "Keyword" },
+    { key: "category", label: "Category" },
+    { key: "subcategory", label: "Sub-category" },
+    ...showPeriods.map(p => ({ key: `p_${p}`, label: p === agg.latestPeriod ? `${p} (latest)` : p })),
+    { key: "movement", label: "Movement" },
   ];
-  const rows = [];
-  for (let i = agg.periods.length - 1; i >= 0; i--) {
-    const v    = values[i];
-    const prev = i > 0 ? values[i - 1] : null;
-    const dlt  = pctChange(v, prev);
-    rows.push({ period: agg.periods[i].label, value: v ?? "", delta: dlt == null ? "" : Number(dlt.toFixed(2)) });
-  }
+  const entries = limit ? agg.sortedEntries.slice(0, limit) : agg.sortedEntries;
+  const rows = entries.map((e, i) => {
+    const row = {
+      rank: i + 1,
+      keyword: e.keyword,
+      category: e.category,
+      subcategory: e.subcategory,
+      movement: e.movementDiff == null ? ""
+        : (e.movementPct != null
+            ? `${e.movementDiff > 0 ? "+" : ""}${e.movementDiff.toFixed(0)} (${e.movementPct > 0 ? "+" : ""}${e.movementPct.toFixed(1)}%)`
+            : `${e.movementDiff > 0 ? "+" : ""}${e.movementDiff}`),
+    };
+    for (const p of showPeriods) {
+      const v = e.periodValues.get(p);
+      row[`p_${p}`] = v == null ? "" : v;
+    }
+    return row;
+  });
+  return { columns, rows };
+}
+
+function downloadTopTable(kind) {
+  const { columns, rows } = topTableColumnsAndRows(10);
   if (!rows.length) { toast("Nothing to download."); return; }
-  if (kind === "csv") return downloadCSV(`${fname}.csv`, cols, rows);
+  const fname = `nat-habit_top-keywords_${ts()}`;
+  if (kind === "csv") return downloadCSV(`${fname}.csv`, columns, rows);
+  const rankMode = currentRankMode();
   downloadXLSX(`${fname}.xlsx`, [
-    { name: metric.label, columns: cols, rows },
-    rawRowsSheet(metricKey),
-    filterContextSheet("Filter context", describeContext()),
+    { name: "Top 10", columns, rows },
+    rawRowsSheet("Filtered rows"),
+    filterContextSheet("Filter context", describeContext(rankMode)),
   ]);
 }
 
-function rawRowsSheet(metricKey) {
-  const { range, level, dim, dims, platforms } = LocalState;
-  const platSet = new Set(platforms);
-  const field = level === "category" ? "category" : level === "subcategory" ? "subcategory" : null;
-  const dimSet = field ? new Set(dims) : null;
-  const effDim = level === "sku" ? dim : "__all__";
+function downloadFullTable(kind) {
+  const { columns, rows } = topTableColumnsAndRows(null);
+  if (!rows.length) { toast("Nothing to download."); return; }
+  const fname = `nat-habit_all-keywords_${ts()}`;
+  if (kind === "csv") return downloadCSV(`${fname}.csv`, columns, rows);
+  const rankMode = currentRankMode();
+  downloadXLSX(`${fname}.xlsx`, [
+    { name: "All keywords", columns, rows },
+    rawRowsSheet("Filtered rows"),
+    filterContextSheet("Filter context", describeContext(rankMode)),
+  ]);
+}
 
-  if (metricKey === "spend" || metricKey === "roas") {
-    const cols = [
-      { key: "platform", label: "Platform" }, { key: "date", label: "Date" },
-      { key: "category", label: "Category" }, { key: "subcategory", label: "Sub-category" },
-      { key: "branded_bucket", label: "Type" }, { key: "marketing_channel", label: "Channel" },
-      { key: "spend", label: "Spend" }, { key: "sales", label: "Ad Sales" },
-    ];
-    const rows = (State.data.bcg_spend || []).filter(r =>
-      platSet.has(r.platform) &&
-      (!range.from || r.date >= range.from) && (!range.to || r.date <= range.to) &&
-      (!dimSet || dimSet.has(r[field])));
-    return { name: "Filtered spend rows", columns: cols, rows };
-  }
+function downloadTrend(kind) {
+  const agg = LocalState._agg;
+  if (!agg || !agg.periods.length) { toast("Nothing to download."); return; }
   const cols = [
-    { key: "platform", label: "Platform" }, { key: "date", label: "Date" },
-    { key: "nh_sku", label: "NH SKU" },
-    { key: "category", label: "Category" }, { key: "subcategory", label: "Sub-category" },
-    { key: "glance_views", label: "Page Views" },
-    { key: "gross_units",  label: "Units" },
-    { key: "revenue",      label: "Revenue" },
+    { key: "keyword", label: "Keyword" },
+    ...agg.periods.map(p => ({ key: `p_${p}`, label: p })),
   ];
-  const rows = (LocalState.salesRows || []).filter(r =>
+  const rows = LocalState.selectedKeywords
+    .slice(0, KEYWORD_TREND_LIMIT)
+    .map(kw => {
+      const e = agg.byKeyword.get(kw);
+      if (!e) return null;
+      const row = { keyword: kw };
+      for (const p of agg.periods) row[`p_${p}`] = e.periodValues.get(p) ?? "";
+      return row;
+    })
+    .filter(Boolean);
+  if (!rows.length) { toast("Pick at least one keyword."); return; }
+  const fname = `nat-habit_keyword-trend_${ts()}`;
+  if (kind === "csv") return downloadCSV(`${fname}.csv`, cols, rows);
+  const rankMode = currentRankMode();
+  downloadXLSX(`${fname}.xlsx`, [
+    { name: "Trend (selected)", columns: cols, rows },
+    rawRowsSheet("Filtered rows"),
+    filterContextSheet("Filter context", describeContext(rankMode)),
+  ]);
+}
+
+/** Build a sheet with the raw filtered rows from State.data for the active view. */
+function rawRowsSheet(name) {
+  const view = LocalState.view;
+  const platSet = new Set(LocalState.platforms);
+  const range = LocalState.range;
+
+  if (view === "weekly") {
+    const weeks = State.data.weeks || [];
+    const eligible = new Set(weeks
+      .filter(w => (!range.from || w.start >= range.from) && (!range.to || w.end <= range.to))
+      .map(w => w.week_num));
+    const cols = [
+      { key: "platform", label: "Platform" },
+      { key: "week_num", label: "Week #" },
+      { key: "search_query", label: "Keyword" },
+      { key: "branded_bucket", label: "Type" },
+      { key: "category", label: "Category" },
+      { key: "subcategory", label: "Sub-category" },
+      { key: "rank", label: "Rank" },
+      { key: "volume", label: "Volume" },
+      { key: "impressions", label: "Impressions" },
+      { key: "brand_impression_share_pct", label: "Brand Impr Share %" },
+      { key: "clicks", label: "Clicks" },
+      { key: "brand_click_share_pct", label: "Brand Click Share %" },
+    ];
+    const rows = (State.data.weekly_sfr || []).filter(r =>
+      platSet.has(r.platform) && eligible.has(r.week_num) &&
+      (LocalState.branded === "both" || (r.branded_bucket || "Generic").toLowerCase() === LocalState.branded)
+    );
+    return { name, columns: cols, rows };
+  }
+
+  const cols = [
+    { key: "platform", label: "Platform" },
+    { key: "date", label: "Date" },
+    { key: "keyword", label: "Keyword" },
+    { key: "category", label: "Category" },
+    { key: "subcategory", label: "Sub-category" },
+    { key: "rank", label: "Rank" },
+  ];
+  const rows = (State.data.daily_sfr || []).filter(r =>
     platSet.has(r.platform) &&
-    (!range.from || r.date >= range.from) && (!range.to || r.date <= range.to) &&
-    (!dimSet || dimSet.has(r[field])) &&
-    (level !== "sku" || effDim === "__all__" || r.nh_sku === effDim));
-  return { name: "Filtered sales rows", columns: cols, rows };
+    (!range.from || r.date >= range.from) &&
+    (!range.to   || r.date <= range.to)
+  );
+  return { name, columns: cols, rows };
+}
+
+function ts() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
