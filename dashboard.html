@@ -56,6 +56,8 @@
 </div>
 
 <!-- Boot states: loading / error / ready -->
+<!-- boot-loading is visible by default so the spinner shows before JS executes.
+     dashboard.js hides it once data is loaded (or on error). -->
 <section id="boot-loading" class="boot-state" aria-live="polite">
   <div class="boot-spinner" aria-hidden="true"></div>
   <p class="boot-msg">Loading dashboard data…</p>
