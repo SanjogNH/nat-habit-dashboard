@@ -294,4 +294,11 @@ els.tabsMobile.forEach(b => {
 // Re-expose for debugging in the console.
 window.NH = { State, loadTab };
 
-boot();
+// Wrap boot in DOMContentLoaded as a safety net against fast post-login
+// redirects where the module may begin executing before the full DOM is
+// painted. ES modules are deferred by spec, but the extra guard costs nothing.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", boot);
+} else {
+  boot();
+}
