@@ -178,15 +178,13 @@ def main():
         label_all = (page.text_content('#filters-business .fl-ms-label') or '').strip()
         assert 'platforms' in label_all.lower() or '(' in label_all, \
             f"Unexpected initial filter label: {label_all!r}"
-        # Open popover, uncheck "All". (Popover re-renders after each change,
-        # so re-query before each click.)
+        # Open popover, click "Clear all" action button.
         page.click('#filters-business .fl-ms-trigger')
         page.wait_for_selector('#filters-business .fl-ms-pop:not([hidden])', timeout=1000)
-        all_box = page.query_selector('#filters-business .fl-ms-pop input[data-all="1"]')
-        assert all_box, "Couldn't find the 'All' checkbox"
-        if page.evaluate("el => el.checked", all_box):
-            all_box.click()
-            page.wait_for_timeout(200)
+        clear_btn = page.query_selector('#filters-business .fl-ms-pop .fl-ms-act[data-act="clear"]')
+        assert clear_btn, "Couldn't find the 'Clear all' action button"
+        clear_btn.click()
+        page.wait_for_timeout(200)
         # Now re-query: popover re-rendered. Pick Amazon.
         amazon_box = page.query_selector('#filters-business .fl-ms-pop input[data-v="Amazon"]')
         assert amazon_box, "Couldn't find Amazon checkbox"
@@ -202,12 +200,12 @@ def main():
             f"Filter label should reflect Amazon selection: {label_amazon!r}"
         rev_amazon = (page.text_content('#bus-revenue-kpi') or '').strip()
         print(f"✓ Platform filter: '{label_all}' → '{label_amazon}' (KPI: {rev_amazon[:30]})")
-        # Restore: re-check All
+        # Restore: re-open, click "Select all"
         page.click('#filters-business .fl-ms-trigger')
         page.wait_for_selector('#filters-business .fl-ms-pop:not([hidden])', timeout=1000)
-        all_box = page.query_selector('#filters-business .fl-ms-pop input[data-all="1"]')
-        if all_box and not page.evaluate("el => el.checked", all_box):
-            all_box.click()
+        select_all_btn = page.query_selector('#filters-business .fl-ms-pop .fl-ms-act[data-act="all"]')
+        if select_all_btn:
+            select_all_btn.click()
             page.wait_for_timeout(300)
         page.click('#tab-business .panel-h1')
         page.wait_for_timeout(300)
@@ -386,13 +384,20 @@ def main():
         roas_kpi = page.text_content('#spd-roas-kpi') or ''
         assert 'x' in roas_kpi or '—' in roas_kpi, f"ROAS KPI looks wrong: {roas_kpi!r}"
         print(f"✓ Spend tab ROAS KPI: {roas_kpi.strip()[:60]}")
-        # Drill down to Marketing Channel level — dim dropdown should appear
+        # Drill down to Marketing Channel level — dim multi-select should appear
         page.click('#filters-spend .fl-seg button[data-v="channel"]')
-        page.wait_for_timeout(300)
-        dim_select = page.query_selector('#spend-dim-select')
-        assert dim_select, "Spend dim select should exist at channel level"
-        options_count = page.evaluate('el => el.options.length', dim_select)
+        page.wait_for_timeout(400)
+        dim_picker = page.query_selector('#spend-dim-slot .fl-ms-trigger')
+        assert dim_picker, "Spend dim picker should exist at channel level"
+        # Open the popover and count the available options (excluding the search
+        # header row, which is .fl-ms-header).
+        dim_picker.click()
+        page.wait_for_selector('#spend-dim-slot .fl-ms-pop:not([hidden])', timeout=1000)
+        options_count = len(page.query_selector_all('#spend-dim-slot .fl-ms-pop .fl-ms-row'))
         print(f"✓ Spend tab: channel level shows {options_count} dimension options")
+        # Close popover by clicking outside (the section heading).
+        page.click('#tab-spend .panel-h1')
+        page.wait_for_timeout(200)
         # Reset to Overall
         page.click('#filters-spend .fl-seg button[data-v="overall"]')
         page.wait_for_timeout(300)
