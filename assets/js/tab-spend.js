@@ -2,8 +2,14 @@
  * tab-spend.js — Spend tab.
  *
  * Spec §5.4. Three chart+table pairs (Spend, Sales, ROAS). Each chart shows
- * three lines: Branded, Generic, Total. Drill levels: Overall / Category /
- * Sub-category / Marketing Channel.
+ * four lines: Branded, Generic, Other, Total. Drill levels: Overall /
+ * Category / Sub-category / Marketing Channel — each drill is a searchable
+ * multi-select that sums its picks.
+ *
+ * Bucketing (Spend tab only, see calculate.py::to_spend_bucket):
+ *   - "Brand"                   → Branded
+ *   - "Generic"                 → Generic
+ *   - anything else (Comp, ∅…)  → Other
  *
  * ROAS = Sales / Spend per branch. Null when Spend = 0 in that branch.
  */
@@ -20,10 +26,13 @@ import {
 /* ---------------------------------------------------------------- *
  * Constants
  * ---------------------------------------------------------------- */
-// Three branches per period.
+// Four branches per period. Other is amber — warm, distinct from
+// terracotta (Branded), sage (Generic), and forest (Total).
+const OTHER_COLOR = "#D89B3C";
 const BRANCHES = [
   { key: "branded", label: "Branded", color: PALETTE[0] },  // terracotta
   { key: "generic", label: "Generic", color: PALETTE[1] },  // sage
+  { key: "other",   label: "Other",   color: OTHER_COLOR }, // amber
   { key: "total",   label: "Total",   color: "#1F2A22" },   // deep forest
 ];
 
@@ -63,7 +72,7 @@ const LocalState = {
   gran: "weekly",
   platforms: [],
   level: "overall",   // 'overall' | 'category' | 'subcategory' | 'channel'
-  dim: "__all__",
+  dims: new Set(),    // multi-select dim values; empty set ↔ "all"
   filters: null,
   _agg: null,
 };
@@ -182,14 +191,14 @@ function buildFilters() {
   });
   bar.appendChild(levelF.el);
 
-  // Dimension dropdown — visibility + options change with level.
+  // Dimension multi-select — built lazily when level !== overall.
+  // The widget is destroyed and rebuilt when level changes (so the options
+  // map to the new field). When level === overall, we hide the wrapper.
   const dimWrap = document.createElement("div");
   dimWrap.className = "fl-group";
   dimWrap.id = "spend-dim-wrap";
-  dimWrap.innerHTML = `
-    <div class="fl-lbl" id="spend-dim-label">Dimension</div>
-    <select id="spend-dim-select" class="fl-select"></select>
-  `;
+  // The widget slots itself in below the label; we just hold a label cell.
+  dimWrap.innerHTML = `<div class="fl-lbl" id="spend-dim-label">Dimension</div><div id="spend-dim-slot"></div>`;
   bar.appendChild(dimWrap);
 
   const toggleBtn = document.createElement("button");
@@ -199,15 +208,18 @@ function buildFilters() {
   wireTableToggleAll(toggleBtn, document.getElementById("content-spend"));
 
   LocalState.filters = { dateF, granF, platsF, levelF };
+  // LocalState.dims is a Set of selected dimension values.  Empty Set = "all".
+  // (Different sentinel from the old "__all__" string so we treat selection
+  // semantics uniformly across new multi-select dim filters.)
+  LocalState.dims = new Set();
 
   syncFromFilters();
   dateF.onChange(() => { syncFromFilters(); rerender(); });
   granF.onChange(() => { syncFromFilters(); rerender(); });
   platsF.onChange(() => { syncFromFilters(); rerender(); });
-  levelF.onChange(() => { LocalState.dim = "__all__"; syncFromFilters(); rerender(); });
-
-  document.getElementById("spend-dim-select").addEventListener("change", e => {
-    LocalState.dim = e.target.value;
+  levelF.onChange(() => {
+    LocalState.dims = new Set();   // reset dim picks when changing level
+    syncFromFilters();
     rerender();
   });
 }
@@ -224,20 +236,26 @@ function syncFromFilters() {
  * Re-render
  * ---------------------------------------------------------------- */
 function rerender() {
-  refreshDimensionDropdown();
+  refreshDimensionFilter();
   const agg = computeAggregations();
   LocalState._agg = agg;
   for (const m of METRICS) renderMetricPanel(m, agg);
   syncTableCollapseLabels(document.getElementById("content-spend"));
 }
 
-function refreshDimensionDropdown() {
+/**
+ * Build (or rebuild) the dimension multi-select to match the current
+ * view-level. When level === overall, hide it entirely.
+ */
+let _dimPicker = null;
+function refreshDimensionFilter() {
   const wrap = document.getElementById("spend-dim-wrap");
-  const sel  = document.getElementById("spend-dim-select");
+  const slot = document.getElementById("spend-dim-slot");
   const labelEl = document.getElementById("spend-dim-label");
   if (LocalState.level === "overall") {
     wrap.style.display = "none";
-    LocalState.dim = "__all__";
+    _dimPicker = null;
+    LocalState.dims = new Set();
     return;
   }
   wrap.style.display = "";
@@ -249,16 +267,46 @@ function refreshDimensionDropdown() {
   };
   labelEl.textContent = labelMap[LocalState.level];
 
+  // Build options scoped to the *current* platform filter so the user only
+  // sees dims that have any data in this view.
   const opts = availableDimensions();
-  sel.innerHTML = [
-    `<option value="__all__">All ${labelMap[LocalState.level].toLowerCase()}s (combined)</option>`,
-    ...opts.map(o => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.display)}</option>`),
-  ].join("");
+  const optionList = opts.map(o => ({ value: o.value, label: o.display }));
 
-  if (LocalState.dim !== "__all__" && !opts.some(o => o.value === LocalState.dim)) {
-    LocalState.dim = "__all__";
-  }
-  sel.value = LocalState.dim;
+  // Lazily create / recreate the picker on level change. We keep around the
+  // most recent selection if the same option set survives — otherwise it's
+  // a fresh "all" selection.
+  const priorSelection = [...LocalState.dims];
+  const optionValues = new Set(optionList.map(o => o.value));
+  const survivors = priorSelection.filter(v => optionValues.has(v));
+
+  // Rebuild the widget every refresh so the option set always tracks the
+  // platform filter. (Cheap — the dropdown markup is small.)
+  slot.innerHTML = "";
+  _dimPicker = createMultiSelect({
+    id: `spend.dim.${LocalState.level}`,    // persist per-level
+    label: labelMap[LocalState.level],
+    options: optionList,
+    defaultSelected: survivors.length ? survivors : optionList.map(o => o.value),
+    allowAll: true,
+    searchable: true,
+    placeholder: `All ${labelMap[LocalState.level].toLowerCase()}s (combined)`,
+  });
+  // The widget's own label is shown by the inline span outside; hide its internal one.
+  _dimPicker.el.querySelector(".fl-lbl")?.remove();
+  slot.appendChild(_dimPicker.el);
+
+  // Sync initial state — full-selection or empty-selection are both treated
+  // as "all" by the aggregator (see computeAggregations).
+  LocalState.dims = new Set(_dimPicker.getSelected());
+
+  _dimPicker.onChange((vals) => {
+    LocalState.dims = new Set(vals);
+    // Re-render charts/tables without rebuilding the picker.
+    const agg = computeAggregations();
+    LocalState._agg = agg;
+    for (const m of METRICS) renderMetricPanel(m, agg);
+    syncTableCollapseLabels(document.getElementById("content-spend"));
+  });
 }
 
 function availableDimensions() {
@@ -280,20 +328,33 @@ function availableDimensions() {
  *   { periods: [{key, label,
  *                branded: {spend, sales, roas, hasData},
  *                generic: {...},
- *                total: {...} }]
+ *                other:   {...},
+ *                total:   {...} }]
  *   }
+ *
+ * Dim filter semantics: LocalState.dims is a Set of selected values for the
+ * current level. Empty Set OR full coverage of available options means "all".
+ * Multiple selected dims are summed (treated as an OR filter).
  * ---------------------------------------------------------------- */
 function computeAggregations() {
-  const { range, gran, platforms, level, dim } = LocalState;
+  const { range, gran, platforms, level } = LocalState;
   const platSet = new Set(platforms);
+
+  // Treat empty selection same as "all" (since the multi-select can be cleared
+  // entirely via Clear All).
+  const allDims = new Set(availableDimensions().map(d => d.value));
+  const useAll = LocalState.dims.size === 0 || LocalState.dims.size === allDims.size;
+  const dimSet = useAll ? null : LocalState.dims;
 
   const rows = (State.data.bcg_spend || []).filter(r => {
     if (!platSet.has(r.platform)) return false;
     if (range.from && r.date < range.from) return false;
     if (range.to   && r.date > range.to)   return false;
-    if (level === "category"    && dim !== "__all__" && r.category          !== dim) return false;
-    if (level === "subcategory" && dim !== "__all__" && r.subcategory       !== dim) return false;
-    if (level === "channel"     && dim !== "__all__" && r.marketing_channel !== dim) return false;
+    if (dimSet) {
+      if (level === "category"    && !dimSet.has(r.category))          return false;
+      if (level === "subcategory" && !dimSet.has(r.subcategory))       return false;
+      if (level === "channel"     && !dimSet.has(r.marketing_channel)) return false;
+    }
     return true;
   });
 
@@ -304,9 +365,13 @@ function computeAggregations() {
     const key = bucketKey(r.date, gran);
     const e = periodMap.get(key);
     if (!e) continue;
-    const branch = r.branded_bucket === "Branded" ? e.branded : e.generic;
-    if (!branch.hasData) { branch.spend = 0; branch.sales = 0; branch.hasData = true; }
-    if (!e.total.hasData) { e.total.spend = 0; e.total.sales = 0; e.total.hasData = true; }
+    // 3-way bucketing — Branded / Generic / Other.
+    let branch;
+    if (r.branded_bucket === "Branded")      branch = e.branded;
+    else if (r.branded_bucket === "Generic") branch = e.generic;
+    else                                     branch = e.other;
+    if (!branch.hasData)   { branch.spend = 0; branch.sales = 0; branch.hasData = true; }
+    if (!e.total.hasData)  { e.total.spend = 0; e.total.sales = 0; e.total.hasData = true; }
     branch.spend  += +r.spend || 0;
     branch.sales  += +r.sales || 0;
     e.total.spend += +r.spend || 0;
@@ -315,7 +380,7 @@ function computeAggregations() {
 
   // Compute ROAS for each branch per period.
   for (const e of periodMap.values()) {
-    for (const b of [e.branded, e.generic, e.total]) {
+    for (const b of [e.branded, e.generic, e.other, e.total]) {
       b.roas = (b.hasData && b.spend > 0) ? b.sales / b.spend : null;
     }
   }
@@ -328,6 +393,7 @@ function _emptyPeriod(p) {
     key: p.key, label: p.label,
     branded: { spend: null, sales: null, roas: null, hasData: false },
     generic: { spend: null, sales: null, roas: null, hasData: false },
+    other:   { spend: null, sales: null, roas: null, hasData: false },
     total:   { spend: null, sales: null, roas: null, hasData: false },
   };
 }
@@ -381,11 +447,12 @@ function renderMetricPanel(metric, agg) {
   }
   metaEl.textContent = `${agg.periods.length} ${pluralize(LocalState.gran, agg.periods.length)}`;
 
-  // Table — one row per period (newest first), columns: Period, Branded, Δ, Generic, Δ, Total, Δ.
+  // Table — one row per period (newest first), columns: Period, Branded, Δ, Generic, Δ, Other, Δ, Total, Δ.
   thead.innerHTML = `<tr>
     <th>Period</th>
     <th class="num">Branded</th><th class="num">Δ</th>
     <th class="num">Generic</th><th class="num">Δ</th>
+    <th class="num">Other</th><th class="num">Δ</th>
     <th class="num">Total</th><th class="num">Δ</th>
   </tr>`;
 
@@ -400,7 +467,7 @@ function renderMetricPanel(metric, agg) {
       const dCell = `<td class="num">${deltaPill(pctChange(v, pv))}</td>`;
       return vCell + dCell;
     };
-    rowsHTML.push(`<tr><td><strong>${escapeHtml(p.label)}</strong></td>${cell(p.branded, prev?.branded)}${cell(p.generic, prev?.generic)}${cell(p.total, prev?.total)}</tr>`);
+    rowsHTML.push(`<tr><td><strong>${escapeHtml(p.label)}</strong></td>${cell(p.branded, prev?.branded)}${cell(p.generic, prev?.generic)}${cell(p.other, prev?.other)}${cell(p.total, prev?.total)}</tr>`);
   }
   tbody.innerHTML = rowsHTML.join("") || `<tr><td colspan="7" class="empty-state">No periods in range.</td></tr>`;
 }
@@ -501,14 +568,16 @@ function renderColoredLineChart(canvas, { labels, series, yFormat, yTitle }) {
  * Downloads
  * ---------------------------------------------------------------- */
 function describeContext() {
+  const dims = [...(LocalState.dims || [])];
+  const allDims = new Set(availableDimensions().map(d => d.value));
+  const useAll = dims.length === 0 || dims.length === allDims.size;
   return {
     "Tab": "Spend",
     "Granularity": LocalState.gran,
     "Date range": `${LocalState.range.from || "—"} to ${LocalState.range.to || "—"}`,
     "Platforms": LocalState.platforms,
     "View level": LocalState.level,
-    "Dimension": (LocalState.dim === "__all__" || LocalState.level === "overall")
-      ? "All combined" : LocalState.dim,
+    "Dimension": (LocalState.level === "overall" || useAll) ? "All combined" : dims,
     "Generated at": new Date().toISOString(),
   };
 }
@@ -526,6 +595,8 @@ function downloadMetric(metricKey, kind) {
     { key: "branded_d",   label: "Δ vs prev (%)" },
     { key: "generic",     label: `Generic ${metric.label}` },
     { key: "generic_d",   label: "Δ vs prev (%)" },
+    { key: "other",       label: `Other ${metric.label}` },
+    { key: "other_d",     label: "Δ vs prev (%)" },
     { key: "total",       label: `Total ${metric.label}` },
     { key: "total_d",     label: "Δ vs prev (%)" },
   ];
@@ -544,6 +615,7 @@ function downloadMetric(metricKey, kind) {
       period: p.label,
       branded: v("branded") ?? "", branded_d: d("branded"),
       generic: v("generic") ?? "", generic_d: d("generic"),
+      other:   v("other")   ?? "", other_d:   d("other"),
       total:   v("total")   ?? "", total_d:   d("total"),
     });
   }
@@ -558,7 +630,11 @@ function downloadMetric(metricKey, kind) {
 
 function rawRowsSheet(name) {
   const platSet = new Set(LocalState.platforms);
-  const { range, level, dim } = LocalState;
+  const { range, level } = LocalState;
+  // Apply the same multi-select dim filter used by computeAggregations.
+  const allDims = new Set(availableDimensions().map(d => d.value));
+  const useAll = LocalState.dims.size === 0 || LocalState.dims.size === allDims.size;
+  const dimSet = useAll ? null : LocalState.dims;
   const cols = [
     { key: "platform", label: "Platform" }, { key: "date", label: "Date" },
     { key: "category", label: "Category" }, { key: "subcategory", label: "Sub-category" },
@@ -570,8 +646,10 @@ function rawRowsSheet(name) {
     platSet.has(r.platform) &&
     (!range.from || r.date >= range.from) &&
     (!range.to   || r.date <= range.to) &&
-    (level !== "category"    || dim === "__all__" || r.category          === dim) &&
-    (level !== "subcategory" || dim === "__all__" || r.subcategory       === dim) &&
-    (level !== "channel"     || dim === "__all__" || r.marketing_channel === dim));
+    (!dimSet || (
+      (level === "category"    && dimSet.has(r.category))          ||
+      (level === "subcategory" && dimSet.has(r.subcategory))       ||
+      (level === "channel"     && dimSet.has(r.marketing_channel))
+    )));
   return { name, columns: cols, rows };
 }
