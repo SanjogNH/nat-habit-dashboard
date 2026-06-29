@@ -120,15 +120,38 @@ def week_num_from_label(label: str | None) -> int | None:
 def to_branded_bucket(value: Any) -> str:
     """Map a 'Search Query Type' / 'Keyword Type' cell to 'Branded' or 'Generic'.
 
-    Source-tag-only classifier. Used by tabs that don't carry the keyword
-    text (e.g., BCG Data). For keyword-aware classification use
-    classify_branded() instead.
+    Source-tag-only classifier — 2-way (used outside the Spend tab).
+    For keyword-aware classification use classify_branded() instead.
     """
     if value is None:
         return "Generic"
     if isinstance(value, float) and math.isnan(value):
         return "Generic"
     return "Branded" if str(value).strip().lower() in BRANDED_TOKENS else "Generic"
+
+
+# Tokens that classify a row as 'Generic' (specifically, not Branded and not
+# Other). Used by the 3-way Spend bucketing only.
+GENERIC_TOKENS = {"generic"}
+
+
+def to_spend_bucket(value: Any) -> str:
+    """Map BCG Data 'Search Query Type' to 'Branded' | 'Generic' | 'Other'.
+
+    Spend-tab only: the Spend tab shows four lines (Branded / Generic /
+    Other / Total). Anything that isn't explicitly Brand or Generic — Comp,
+    blank, unknown labels — falls into 'Other'.
+    """
+    if value is None:
+        return "Other"
+    if isinstance(value, float) and math.isnan(value):
+        return "Other"
+    s = str(value).strip().lower()
+    if s in BRANDED_TOKENS:
+        return "Branded"
+    if s in GENERIC_TOKENS:
+        return "Generic"
+    return "Other"
 
 
 # Keyword tokens that mark a search term as Branded by definition.
@@ -324,7 +347,7 @@ def process_bcg_spend(raw: pd.DataFrame) -> tuple[list[dict], pd.DataFrame]:
     df["category"] = df.get("Category", pd.Series([None] * len(df))).astype("string").str.strip()
     df["subcategory"] = df.get("Subcategory", pd.Series([None] * len(df))).astype("string").str.strip()
     bucket_src = df["Keyword Type"] if "Keyword Type" in df.columns else df.get("Search Query Type")
-    df["branded_bucket"] = bucket_src.map(to_branded_bucket) if bucket_src is not None else "Generic"
+    df["branded_bucket"] = bucket_src.map(to_spend_bucket) if bucket_src is not None else "Other"
     df["marketing_channel"] = df.get("Marketing Channel", pd.Series([None] * len(df))).astype("string").str.strip()
     df["spend"] = to_num(df.get("Spend")) if "Spend" in df.columns else pd.NA
     df["sales"] = to_num(df.get("Sales")) if "Sales" in df.columns else pd.NA
