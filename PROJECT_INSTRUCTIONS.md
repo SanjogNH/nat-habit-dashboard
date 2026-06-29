@@ -208,11 +208,34 @@ These run inside `calculate.py` before writing JSON.
   fully contained in the range (both `start` and `end` inside the picker's
   from–to).
 
-### 4.3 Branded vs Generic (two-way split)
+### 4.3 Branded / Generic bucketing — split by tab
 
-- Source columns: `Search Query Type` (Weekly SFR Movement, BCG Data).
-- `Brand` → Branded.
-- Anything else (`Comp`, `Generic`, blank) → Generic.
+The `Search Query Type` column is bucketed differently depending on
+which tab consumes the row.
+
+**Two-way bucket** — used by **Weekly SFR Movement**, **Search Movement
+tab**, and **Impressions & Brand Share tab**:
+
+- `Brand` → Branded
+- anything else (`Generic`, `Comp`, blank) → Generic
+
+Function: `to_branded_bucket` (Python) / `toBrandedBucket` (JS).
+
+**Three-way bucket** — used **only by BCG Data → Spend tab**:
+
+- `Brand` → Branded
+- `Generic` → Generic
+- anything else (`Comp`, blank, unknown labels) → **Other**
+
+Function: `to_spend_bucket` (Python) / `toSpendBucket` (JS).
+
+Spend tab charts have four lines — Branded, Generic, Other, Total — and
+the table mirrors that with four value/Δ pairs. The Impressions and
+Search Movement segmented controls remain three-option (Both / Branded /
+Generic).
+
+The JSON field name `branded_bucket` is reused for both schemes; its
+domain depends on the source tab.
 
 ### 4.4 Subcategory naming
 
@@ -256,8 +279,9 @@ Layout for every tab:
 ### 5.1 Search Movement (default landing tab)
 
 - **Filter bar:** date range, granularity toggle (Daily / Weekly), platform
-  multi-select, branded/generic filter (Branded / Generic / Both),
-  search-keyword multi-select (max 10 for the trend chart).
+  multi-select, **category multi-select**, **keyword multi-select**
+  (tab-wide, no cap), branded/generic filter (Both / Branded / Generic),
+  rank/volume toggle (Weekly only, when Amazon is in the platform set).
 - **Behaviour:**
   - Daily uses `Daily SFR` (only a subset of keywords exists daily).
     Weekly uses `Weekly SFR Movement`.
@@ -266,13 +290,29 @@ Layout for every tab:
     (higher = better). Amazon cannot be combined with volume-based
     platforms in the same chart — show a warning and disable platform
     combinations that mix rank and volume.
+  - The Category filter restricts which keywords are considered for
+    both the Top Keywords table and the Keyword Trend chart.
+  - The Keyword filter cascades from Category — its options refresh to
+    show only keywords whose category passes the Category filter.
+    Picking nothing (or everything) means "all keywords".
 - **Panels (in order):**
-  1. **Top Keywords table** — current period's top 10 by rank (Amazon) or
-     volume (others), with their movement vs previous period (delta +
-     arrow). Includes a "View full list" expand button.
+  1. **Top Keywords table** — top 10 keywords by the active sort column.
+     Default sort is the latest period (ascending in rank mode,
+     descending in volume mode). Columns: `#`, Keyword, Category, one
+     column per week/day in the **full** date range, Movement. The table
+     is wrapped in a horizontal-scroll container so wider ranges remain
+     readable. Every column header except `#` and `Movement` is
+     clickable; clicking re-sorts the table and recomputes which 10
+     keywords are shown (e.g., sorting by `Week21` shows the top 10 for
+     Week 21). Clicking a sorted column again flips direction; clicking
+     a third time reverts to default sort. A "View full list" button
+     opens a modal with all keywords sharing the same column set and
+     sort spec.
   2. **Keyword Trend chart** (the "old-fashioned" multi-keyword overlay)
-     — line chart with up to 10 selected keywords as separate lines,
-     x-axis = the chosen granularity over the date range. CSV/Excel
+     — line chart with up to 10 keywords as separate lines, x-axis =
+     the chosen granularity over the date range. The chart's own
+     keyword picker (max 10) draws its option list from the keywords
+     that pass the tab-wide Category + Keyword filters. CSV/Excel
      download of the underlying long-format data.
 
 ### 5.2 Impressions & Brand Share
@@ -308,8 +348,8 @@ shows "N/A at SKU level."
 
 - **Filter bar:** date range, granularity toggle (Daily / Weekly /
   Monthly), platform multi-select, view-level segmented control (Overall
-  / Category / Subcategory / SKU), dimension dropdown (visible when
-  view-level ≠ Overall).
+  / Category / Subcategory / SKU), **dimension multi-select**
+  (searchable; visible when view-level ≠ Overall; multi-selection sums).
 - **Chart + table pairs (in order):**
   1. Page Views (Glance Views)
   2. Units Sold (Gross Units)
@@ -324,13 +364,19 @@ Source: BCG Data.
 
 - **Filter bar:** date range, granularity toggle (Daily / Weekly /
   Monthly), platform multi-select, view-level segmented control (Overall
-  / Category / Subcategory / Marketing Channel), dimension dropdown.
-- **Chart + table pairs** (each chart shows three lines: Branded,
-  Generic, Total):
+  / Category / Subcategory / Marketing Channel), **dimension
+  multi-select** (searchable; appears when view-level ≠ Overall;
+  multi-selection sums — picking three categories produces one set of
+  lines summed across them).
+- **Chart + table pairs** (each chart shows four lines: Branded,
+  Generic, **Other**, Total — per the 3-way Spend bucketing in §4.3):
   1. Spend (₹)
   2. Sales (₹, ad-attributable)
   3. ROAS (= Sales / Spend; null when Spend = 0)
-- Tables alongside show all three values per period plus the deltas.
+- Tables alongside show all four values per period plus the deltas.
+  When no rows fall into the Other bucket (e.g. the source only
+  contains `Brand` and `Generic`), the Other line draws as flat / empty
+  rather than disappearing — keeps the column structure stable.
 
 ### 5.5 Influencer
 
@@ -371,10 +417,23 @@ Data joined on Category.
 
 - **Date range:** from–to date picker. Default = last 90 days. Min/max
   bounded by data extent.
-- **Granularity:** where applicable — Daily / Weekly / Monthly.
-- **Platform:** multi-select with "All" option, dynamic from data.
-- **Category, Subcategory:** cascading multi-selects (selecting categories
-  filters the subcategory list).
+- **Granularity:** where applicable — Daily / Weekly / Monthly. Always a
+  segmented single-choice control (not multi-select — semantically a
+  user can only be looking at one granularity at a time).
+- **View level** (Business, Spend): segmented single-choice control for
+  the same reason.
+- **Multi-selects** (Platforms, Categories, Sub-categories, SKUs,
+  Keywords, Influencers, Campaigns, dimension picker): all use the same
+  widget factory in `filters.js` with these defaults:
+  - **Searchable** — every dropdown has a sticky search box at the top.
+  - **Select all / Clear all** action buttons in the same header row.
+    With a search query active, both actions operate on just the
+    currently-visible matches; cleared search means operate on the
+    full option list.
+  - Trigger label reflects selection count: "All X (N)", "1 selected",
+    "K selected", or the placeholder when nothing's selected.
+- **Category, Subcategory:** cascading multi-selects (selecting
+  categories filters the subcategory list).
 - All filters persist within a session (sessionStorage) and reset on
   logout/refresh.
 
