@@ -463,6 +463,62 @@ a:hover { text-decoration: underline; }
   overflow-y: auto;
   padding: 6px;
 }
+/* Sticky header inside the multi-select popover — holds the search input
+   and the Select all / Clear all action buttons on one row. */
+.fl-ms-header {
+  position: sticky;
+  top: -6px;
+  background: var(--brand-surface);
+  padding: 6px 4px 6px;
+  margin: -6px -6px 0;
+  border-bottom: 1px solid var(--brand-border);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fl-ms-searchbox {
+  flex: 1 1 auto;
+  min-width: 0;          /* allow shrink in narrow popovers */
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: 6px 10px;
+  border: 1px solid var(--brand-border-2);
+  border-radius: var(--r-sm);
+  background: var(--brand-bg);
+  color: var(--brand-deep);
+}
+.fl-ms-searchbox:focus { outline: none; border-color: var(--brand-primary); }
+.fl-ms-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.fl-ms-act {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--brand-primary);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  padding: 4px 6px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.fl-ms-act:hover:not(:disabled) { background: var(--brand-accent); }
+.fl-ms-act:disabled {
+  color: var(--brand-muted-2);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.fl-ms-actsep {
+  color: var(--brand-muted-2);
+  font-size: var(--fs-xs);
+}
+/* Back-compat: keep old class names but they're no longer emitted.  Left in
+   place in case any cached HTML still uses them. */
 .fl-ms-search {
   position: sticky;
   top: -6px;
@@ -653,6 +709,22 @@ a:hover { text-decoration: underline; }
 }
 .data-tbl .kw-cell { font-weight: 600; }
 .data-tbl .cat-cell { color: var(--brand-muted); }
+
+/* Sortable column headers — Search Movement top-keywords table. */
+.data-tbl th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+.data-tbl th.sortable:hover { color: var(--brand-deep); }
+.data-tbl th.sortable.is-active-sort {
+  color: var(--brand-primary);
+}
+.data-tbl th .sort-arrow {
+  display: inline-block;
+  min-width: 12px;
+  font-size: 10px;
+  color: var(--brand-primary);
+}
 
 .pill {
   display: inline-flex;
