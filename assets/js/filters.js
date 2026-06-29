@@ -176,9 +176,9 @@ export function createSegmented(opts) {
  * @param {string} opts.label
  * @param {Array<{value, label, group?}>} opts.options
  * @param {string[]} [opts.defaultSelected]   defaults to all options
- * @param {boolean} [opts.allowAll=true]      include an "All" master row
+ * @param {boolean} [opts.allowAll=true]      enables the "Select all" action
  * @param {number}  [opts.maxSelected]        cap selections; null = unlimited
- * @param {boolean} [opts.searchable=false]   add a search input
+ * @param {boolean} [opts.searchable=true]    show a search input at the top
  * @param {string}  [opts.placeholder="Select…"]
  * @param {(value, currentlySelected) => string|null} [opts.validate]
  *     Called whenever the user toggles an item. Returning a string aborts
@@ -190,7 +190,7 @@ export function createMultiSelect(opts) {
     defaultSelected = null,
     allowAll = true,
     maxSelected = null,
-    searchable = false,
+    searchable = true,
     placeholder = "Select…",
     validate = null,
   } = opts;
@@ -255,20 +255,29 @@ export function createMultiSelect(opts) {
       groups.get(g).push(o);
     }
 
-    let html = "";
-    if (searchable) {
-      html += `<div class="fl-ms-search">
-        <input type="text" placeholder="Search…" value="${escapeHtml(searchText)}" autocomplete="off">
-      </div>`;
+    // Sticky header: search box + action buttons.
+    // - Select all is shown only when allowAll AND no maxSelected cap.
+    // - Clear all is always available.
+    const hasSearch = !!searchable;
+    const showSelectAll = allowAll && (maxSelected == null);
+    let header = "";
+    if (hasSearch || showSelectAll || true /* always show Clear */) {
+      const selectedCount = selected.size;
+      header = `<div class="fl-ms-header">`;
+      if (hasSearch) {
+        header += `<input type="text" class="fl-ms-searchbox" placeholder="Search…" value="${escapeHtml(searchText)}" autocomplete="off" spellcheck="false">`;
+      }
+      header += `<div class="fl-ms-actions">`;
+      if (showSelectAll) {
+        header += `<button type="button" class="fl-ms-act" data-act="all">Select all</button>`;
+        header += `<span class="fl-ms-actsep" aria-hidden="true">·</span>`;
+      }
+      header += `<button type="button" class="fl-ms-act" data-act="clear" ${selectedCount === 0 ? "disabled" : ""}>Clear all</button>`;
+      header += `</div></div>`;
+      header += `<div class="fl-ms-sep"></div>`;
     }
-    if (allowAll) {
-      const allOn = options.every(o => selected.has(o.value));
-      html += `<label class="fl-ms-row fl-ms-row--all">
-        <input type="checkbox" data-all="1" ${allOn ? "checked" : ""}>
-        <span>All ${escapeHtml(label.toLowerCase())}</span>
-      </label>
-      <div class="fl-ms-sep"></div>`;
-    }
+
+    let html = header;
     for (const [groupName, items] of groups) {
       if (groupName) {
         html += `<div class="fl-ms-grouphead">${escapeHtml(groupName)}</div>`;
@@ -289,47 +298,84 @@ export function createMultiSelect(opts) {
   }
 
   function bindPop() {
-    if (searchable) {
-      const s = pop.querySelector(".fl-ms-search input");
-      if (s) {
-        s.addEventListener("input", (e) => {
-          searchText = e.target.value;
-          const sel = e.target.selectionStart;
-          renderPop();
-          const ns = pop.querySelector(".fl-ms-search input");
-          if (ns) { ns.focus(); try { ns.setSelectionRange(sel, sel); } catch {} }
-        });
-        s.addEventListener("click", e => e.stopPropagation());
-      }
+    // Search input — sticky behavior: keep focus + caret on input.
+    const s = pop.querySelector(".fl-ms-searchbox");
+    if (s) {
+      s.addEventListener("input", (e) => {
+        searchText = e.target.value;
+        const caret = e.target.selectionStart;
+        renderPop();
+        const ns = pop.querySelector(".fl-ms-searchbox");
+        if (ns) { ns.focus(); try { ns.setSelectionRange(caret, caret); } catch {} }
+      });
+      s.addEventListener("click", e => e.stopPropagation());
+      s.addEventListener("keydown", e => {
+        // Stop the outside-click handler from swallowing typing.
+        e.stopPropagation();
+        if (e.key === "Escape") { searchText = ""; renderPop(); }
+      });
     }
-    pop.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-      cb.addEventListener("change", () => {
-        const v = cb.dataset.v;
-        const isAll = cb.dataset.all === "1";
-        if (isAll) {
-          if (cb.checked) selected = new Set(allValues);
-          else selected = new Set();
-        } else {
+
+    // Select all / Clear all action buttons.
+    pop.querySelectorAll(".fl-ms-act").forEach(btn => {
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
+        const act = btn.dataset.act;
+        if (act === "all") {
+          // Respect search filter — selecting "all" while a search is
+          // active selects only the currently visible matches (in
+          // addition to whatever was already selected).
+          const filtered = searchText
+            ? options.filter(o => o.label.toLowerCase().includes(searchText.toLowerCase()))
+            : options;
           const next = new Set(selected);
-          if (cb.checked) next.add(v); else next.delete(v);
-          if (validate) {
-            const err = validate(v, next);
-            if (err) {
-              cb.checked = !cb.checked;  // revert
-              showWarn(err);
-              return;
-            }
-          }
+          for (const o of filtered) next.add(o.value);
           if (maxSelected != null && next.size > maxSelected) {
-            cb.checked = false;
             showWarn(`Maximum ${maxSelected} can be selected at a time.`);
             return;
           }
           selected = next;
+        } else if (act === "clear") {
+          // Same logic — if search is active, only clear the visible matches.
+          if (searchText) {
+            const visible = new Set(options
+              .filter(o => o.label.toLowerCase().includes(searchText.toLowerCase()))
+              .map(o => o.value));
+            selected = new Set([...selected].filter(v => !visible.has(v)));
+          } else {
+            selected = new Set();
+          }
         }
         Persist.set(id, [...selected]);
         updateLabel();
-        // Re-render to refresh the "All" checkbox state.
+        renderPop();
+        handlers.forEach(fn => fn([...selected]));
+      });
+    });
+
+    // Per-item checkbox toggles.
+    pop.querySelectorAll('.fl-ms-row input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener("change", () => {
+        const v = cb.dataset.v;
+        const next = new Set(selected);
+        if (cb.checked) next.add(v); else next.delete(v);
+        if (validate) {
+          const err = validate(v, next);
+          if (err) {
+            cb.checked = !cb.checked;  // revert
+            showWarn(err);
+            return;
+          }
+        }
+        if (maxSelected != null && next.size > maxSelected) {
+          cb.checked = false;
+          showWarn(`Maximum ${maxSelected} can be selected at a time.`);
+          return;
+        }
+        selected = next;
+        Persist.set(id, [...selected]);
+        updateLabel();
+        // Re-render to refresh action-button disabled state.
         renderPop();
         handlers.forEach(fn => fn([...selected]));
       });
