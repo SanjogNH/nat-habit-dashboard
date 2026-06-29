@@ -169,13 +169,31 @@ export function toNum(value) {
 /**
  * Map a "Search Query Type" or "Keyword Type" value to "Branded" or "Generic".
  * Anything not in BRANDED_TOKENS — including null, blank, "Comp", "Generic" —
- * is Generic. Source-tag-only classifier — used by BCG which has no keyword
- * column. For keyword-aware tabs (Weekly SFR), use classifyBranded.
+ * is Generic. Source-tag-only 2-way classifier — used by Impressions and
+ * Search Movement tabs. For keyword-aware tabs (Weekly SFR), use classifyBranded.
  */
 export function toBrandedBucket(value) {
   if (value == null) return "Generic";
   const s = String(value).trim().toLowerCase();
   return BRANDED_TOKENS.has(s) ? "Branded" : "Generic";
+}
+
+/** Tokens that classify a row as 'Generic' for the 3-way Spend bucketing. */
+const GENERIC_TOKENS = new Set(["generic"]);
+
+/**
+ * Map BCG Data "Search Query Type" to "Branded" | "Generic" | "Other".
+ *
+ * Spend-tab only. Anything that isn't explicitly Brand or Generic — Comp,
+ * blank, unknown labels — falls into 'Other'. Mirror of
+ * calculate.py::to_spend_bucket.
+ */
+export function toSpendBucket(value) {
+  if (value == null) return "Other";
+  const s = String(value).trim().toLowerCase();
+  if (BRANDED_TOKENS.has(s)) return "Branded";
+  if (GENERIC_TOKENS.has(s)) return "Generic";
+  return "Other";
 }
 
 /** Tokens that mark a keyword as Branded by its text alone. */
@@ -372,7 +390,7 @@ function processBcgSpend(raw) {
       platform, date,
       category:      clean(rowGet(r, "Category")),
       subcategory:   subcategoryOf(r),
-      branded_bucket: toBrandedBucket(bucketSrc),
+      branded_bucket: toSpendBucket(bucketSrc),
       marketing_channel: clean(rowGet(r, "Marketing Channel")),
       spend: toNum(rowGet(r, "Spend")),
       sales: toNum(rowGet(r, "Sales")),
