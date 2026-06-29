@@ -27,7 +27,13 @@ const LocalState = {
   range: { from: "", to: "" },
   platforms: [],
   branded: "both",         // 'both' | 'branded' | 'generic' (Weekly only)
-  selectedKeywords: [],
+  globalCategories: [],    // tab-wide multi-select (empty array = all)
+  globalKeywords: [],      // tab-wide multi-select (empty array = all)
+  selectedKeywords: [],    // trend-chart picker selection (max 10)
+  // sort: { col, dir }
+  //   col: null (default), "keyword", "category", or a period label e.g. "Week23"
+  //   dir: "auto" (rank→asc, volume→desc), "asc", or "desc"
+  sort: { col: null, dir: "auto" },
   filters: null,           // map of widget refs
 };
 
@@ -193,6 +199,39 @@ function buildFilters() {
     ],
     defaultValue: "both",
   });
+  // appended later — after Categories + Keywords filters
+
+  // Categories — multi-select, derived from weekly_sfr (the primary backing data
+  // for Search Movement). Daily rows inherit category from the same upstream.
+  const catSet = new Set();
+  for (const r of State.data.weekly_sfr || []) if (r.category) catSet.add(r.category);
+  for (const r of State.data.daily_sfr  || []) if (r.category) catSet.add(r.category);
+  const categoryOptions = [...catSet].sort().map(c => ({ value: c, label: c }));
+  const categoriesF = createMultiSelect({
+    id: "search.categories",
+    label: "Categories",
+    options: categoryOptions,
+    defaultSelected: categoryOptions.map(o => o.value),
+    allowAll: true,
+    searchable: true,
+  });
+  bar.appendChild(categoriesF.el);
+
+  // Keywords — multi-select, cascades from categories. No max cap (tab-wide
+  // filter; the trend-chart picker has its own 10-cap downstream).
+  const keywordsF = createMultiSelect({
+    id: "search.keywords",
+    label: "Keywords",
+    options: collectKeywordOptions(categoriesF.getSelected()),
+    defaultSelected: null,          // null = all by default
+    allowAll: true,
+    searchable: true,
+    placeholder: "All keywords",
+  });
+  bar.appendChild(keywordsF.el);
+
+  // Now append Keyword Type (after the Categories + Keywords filters so the
+  // visual order is: Date · View · Platforms · Categories · Keywords · Keyword Type · View by).
   bar.appendChild(brandedF.el);
 
   // "View by" — only meaningful when Amazon is the sole selected platform
@@ -215,16 +254,50 @@ function buildFilters() {
   LocalState._rankPlatformOptions = RANK_PLATFORM_OPTIONS;
 
   // Wire change events.
-  LocalState.filters = { dateF, viewF, platsF, brandedF, metricF };
+  LocalState.filters = { dateF, viewF, platsF, brandedF, metricF, categoriesF, keywordsF };
   syncFromFilters();
   // If we're starting in Rank mode + Weekly, clamp the platforms picker now
   // (in case persisted state has Volume-only platforms selected).
   applyMetricModeToPicker(/* toastOnDrop */ false);
-  dateF.onChange(() => { syncFromFilters(); rerender(); });
-  viewF.onChange(() => { syncFromFilters(); applyMetricModeToPicker(false); rerender(); });
-  platsF.onChange(() => { syncFromFilters(); rerender(); });
-  brandedF.onChange(() => { syncFromFilters(); rerender(); });
-  metricF.onChange(() => { syncFromFilters(); applyMetricModeToPicker(true); rerender(); });
+
+  // Filter changes invalidate the user's column sort (different periods may
+  // now be in view). Reset it so the table goes back to its natural ordering.
+  const onFilterChange = () => { LocalState.sort = { col: null, dir: "auto" }; };
+
+  dateF.onChange(() => { onFilterChange(); syncFromFilters(); rerender(); });
+  viewF.onChange(() => { onFilterChange(); syncFromFilters(); applyMetricModeToPicker(false); rerender(); });
+  platsF.onChange(() => { onFilterChange(); syncFromFilters(); rerender(); });
+  brandedF.onChange(() => { onFilterChange(); syncFromFilters(); rerender(); });
+  metricF.onChange(() => { onFilterChange(); syncFromFilters(); applyMetricModeToPicker(true); rerender(); });
+  categoriesF.onChange(() => {
+    onFilterChange();
+    syncFromFilters();
+    // Cascade: re-derive keyword options from the new category selection,
+    // dropping picks that no longer apply.
+    keywordsF.setOptions(collectKeywordOptions(LocalState.globalCategories));
+    LocalState.globalKeywords = keywordsF.getSelected();
+    rerender();
+  });
+  keywordsF.onChange(() => { onFilterChange(); syncFromFilters(); rerender(); });
+}
+
+/**
+ * Build the option list for the global Keyword multi-select, restricted to
+ * keywords whose category is among the currently-selected categories.
+ * Used for both the initial build and the cascade on category change.
+ */
+function collectKeywordOptions(selectedCats) {
+  const catSet = new Set(selectedCats);
+  const kwSet = new Set();
+  const addIfMatches = (r, kwField) => {
+    const kw = r[kwField];
+    if (!kw) return;
+    if (catSet.size && !catSet.has(r.category)) return;
+    kwSet.add(kw);
+  };
+  for (const r of State.data.weekly_sfr || []) addIfMatches(r, "search_query");
+  for (const r of State.data.daily_sfr  || []) addIfMatches(r, "keyword");
+  return [...kwSet].sort().map(k => ({ value: k, label: k }));
 }
 
 /**
@@ -254,12 +327,14 @@ function applyMetricModeToPicker(toastOnDrop) {
 }
 
 function syncFromFilters() {
-  const { dateF, viewF, platsF, brandedF, metricF } = LocalState.filters;
+  const { dateF, viewF, platsF, brandedF, metricF, categoriesF, keywordsF } = LocalState.filters;
   LocalState.range = dateF.getRange();
   LocalState.view = viewF.getValue();
   LocalState.platforms = platsF.getSelected();
   LocalState.branded = brandedF.getValue();
   LocalState.metricMode = metricF.getValue();   // 'rank' or 'volume'
+  LocalState.globalCategories = categoriesF ? categoriesF.getSelected() : [];
+  LocalState.globalKeywords   = keywordsF   ? keywordsF.getSelected()   : [];
   // Keyword-type filter is valid in both Weekly and Daily — daily rows
   // carry a branded_bucket field enriched by the pipeline.
 }
@@ -371,13 +446,17 @@ function aggregateWeekly({ range, platforms, branded, rankMode }) {
   const periodLabels = eligibleWeeks.map(w => w.label);  // 'Week23'
   const periodMeta = new Map(eligibleWeeks.map(w => [w.label, w]));
 
-  // Filter rows: platform, week, branded.
+  // Filter rows: platform, week, branded, category, keyword.
   const platSet = new Set(platforms);
   const brandedFilter = branded;
+  const catSet  = setOrNullForAll(LocalState.globalCategories);
+  const kwSet   = setOrNullForAll(LocalState.globalKeywords);
   const filtered = allRows.filter(r =>
     platSet.has(r.platform) &&
     weekNumSet.has(r.week_num) &&
-    (brandedFilter === "both" || (r.branded_bucket || "Generic").toLowerCase() === brandedFilter)
+    (brandedFilter === "both" || (r.branded_bucket || "Generic").toLowerCase() === brandedFilter) &&
+    (catSet == null || catSet.has(r.category)) &&
+    (kwSet  == null || kwSet.has(r.search_query))
   );
 
   // Group by keyword × week. Metric: rank (Amazon) → min; volume (others) → sum.
@@ -405,18 +484,34 @@ function aggregateWeekly({ range, platforms, branded, rankMode }) {
   return finishAgg(byKeyword, periodLabels, periodMeta, rankMode);
 }
 
+/**
+ * Treat a "fully selected" multi-select as "no filter at all" so the table
+ * doesn't go empty when the widget is built with everything pre-checked but
+ * the underlying data has more categories/keywords than the option set.
+ *
+ * Returns: null (= no filter) | Set of allowed values
+ */
+function setOrNullForAll(arr) {
+  if (!arr || arr.length === 0) return null;
+  return new Set(arr);
+}
+
 function aggregateDaily({ range, platforms, branded, rankMode }) {
   const allRows = State.data.daily_sfr;
   if (!Array.isArray(allRows)) return emptyAgg();
 
   const platSet = new Set(platforms);
   const brandedFilter = branded;
+  const catSet = setOrNullForAll(LocalState.globalCategories);
+  const kwSet  = setOrNullForAll(LocalState.globalKeywords);
   const filtered = allRows.filter(r => {
     if (!platSet.has(r.platform)) return false;
     if (range.from && r.date < range.from) return false;
     if (range.to   && r.date > range.to)   return false;
     if (brandedFilter !== "both" &&
         (r.branded_bucket || "Generic").toLowerCase() !== brandedFilter) return false;
+    if (catSet && !catSet.has(r.category)) return false;
+    if (kwSet  && !kwSet.has(r.keyword))   return false;
     return true;
   });
 
@@ -450,7 +545,6 @@ function aggregateDaily({ range, platforms, branded, rankMode }) {
 
 function finishAgg(byKeyword, periodLabels, periodMeta, rankMode) {
   // "Latest" = most recent period in range that has at least one data point.
-  // If that period is mid-range, the table shows the 5 leading up to it.
   const periodsWithData = periodLabels.filter(p =>
     [...byKeyword.values()].some(e => e.periodValues.get(p) != null)
   );
@@ -462,9 +556,9 @@ function finishAgg(byKeyword, periodLabels, periodMeta, rankMode) {
   const latestIdx = latestPeriod ? periodLabels.indexOf(latestPeriod) : -1;
   const prevPeriod = latestIdx > 0 ? periodLabels[latestIdx - 1] : null;
 
-  // The visible window for table columns: last 5 periods ending at latest.
-  const visibleEnd = latestIdx >= 0 ? latestIdx + 1 : periodLabels.length;
-  const visiblePeriods = periodLabels.slice(Math.max(0, visibleEnd - 5), visibleEnd);
+  // Visible periods = the full eligible range (the user's date filter now
+  // determines column count; the table scrolls horizontally if it overflows).
+  const visiblePeriods = periodLabels.slice();
 
   // Compute latest/prev and movement per keyword.
   for (const entry of byKeyword.values()) {
@@ -489,16 +583,12 @@ function finishAgg(byKeyword, periodLabels, periodMeta, rankMode) {
     }
   }
 
-  // Sort keywords by latest period value (ascending for rank, descending for volume).
-  // Keywords missing in latest period go last.
-  const arr = [...byKeyword.values()];
-  arr.sort((a, b) => {
-    const av = a.latestValue, bv = b.latestValue;
-    if (av == null && bv == null) return a.keyword.localeCompare(b.keyword);
-    if (av == null) return 1;
-    if (bv == null) return -1;
-    return rankMode ? (av - bv) : (bv - av);
-  });
+  // Default sort: by latest period value (ascending for rank, descending for
+  // volume). Keywords missing in latest period go last. This drives
+  // keywordsSortedForLatest (used by the trend picker) regardless of the
+  // user's table sort choice.
+  const defaultSorted = [...byKeyword.values()].sort((a, b) =>
+    compareByValue(a.latestValue, b.latestValue, a.keyword, b.keyword, rankMode));
 
   return {
     periods: periodLabels,
@@ -506,9 +596,20 @@ function finishAgg(byKeyword, periodLabels, periodMeta, rankMode) {
     periodMeta,
     latestPeriod, prevPeriod,
     byKeyword,
-    keywordsSortedForLatest: arr.map(e => e.keyword),
-    sortedEntries: arr,
+    keywordsSortedForLatest: defaultSorted.map(e => e.keyword),
+    sortedEntries: defaultSorted,    // default order; renderTopTable may resort
   };
+}
+
+/**
+ * Shared comparator for the top-keywords table. `rankMode` flips the sense
+ * (lower rank wins; higher volume wins). Nulls last regardless.
+ */
+function compareByValue(av, bv, aKey, bKey, rankMode) {
+  if (av == null && bv == null) return aKey.localeCompare(bKey);
+  if (av == null) return 1;
+  if (bv == null) return -1;
+  return rankMode ? (av - bv) : (bv - av);
 }
 
 function emptyAgg() {
@@ -521,7 +622,7 @@ function emptyAgg() {
 }
 
 /* ---------------------------------------------------------------- *
- * Top-10 table
+ * Top-10 table — now sortable + spans the full eligible date range
  * ---------------------------------------------------------------- */
 function renderTopTable(agg, rankMode) {
   const thead = document.querySelector("#search-top-tbl thead");
@@ -533,22 +634,108 @@ function renderTopTable(agg, rankMode) {
     return;
   }
 
-  const showPeriods = agg.visiblePeriods;        // 5 periods ending at latest-with-data
-  const isWeekly = (LocalState.view === "weekly");
+  const showPeriods = agg.visiblePeriods;   // all eligible periods in range
+  // Resolve the active sort spec into (col, dir).
+  const sortSpec = resolveSortSpec(agg, rankMode);
 
-  let head = `<tr><th class="rank">#</th><th>Keyword</th><th>Category</th>`;
+  // Reorder + slice to top-10 based on the active sort column.
+  const ordered = orderEntriesForSort(agg.sortedEntries, sortSpec, rankMode);
+  const top10 = ordered.slice(0, 10);
+
+  // Build header with sortable controls. # is not sortable (it's just row index
+  // after sort); every other column is.
+  let head = `<tr>
+    <th class="rank">#</th>
+    ${sortableTh("keyword",  "Keyword",  sortSpec, "left")}
+    ${sortableTh("category", "Category", sortSpec, "left")}`;
   for (const p of showPeriods) {
     const isLatest = (p === agg.latestPeriod);
     const meta = agg.periodMeta.get(p);
-    const tip = meta?.range_display ? ` title="${escapeHtml(meta.range_display)}"` : "";
+    const tip = meta?.range_display ? meta.range_display : "";
     const label = isLatest ? `${p} (latest)` : p;
-    head += `<th class="num"${tip}>${escapeHtml(label)}</th>`;
+    head += sortableTh(p, label, sortSpec, "num", tip);
   }
   head += `<th class="num">Movement</th></tr>`;
   thead.innerHTML = head;
 
-  const top10 = agg.sortedEntries.slice(0, 10);
+  // Wire click handlers on sortable th cells.
+  thead.querySelectorAll("th[data-sort-col]").forEach(th => {
+    th.addEventListener("click", () => {
+      const col = th.dataset.sortCol;
+      const cur = LocalState.sort;
+      // Cycle: same column → flip dir; new column → auto (rank/volume default).
+      if (cur.col === col) {
+        const next = cur.dir === "asc" ? "desc" : (cur.dir === "desc" ? "auto" : "asc");
+        LocalState.sort = next === "auto" ? { col: null, dir: "auto" } : { col, dir: next };
+      } else {
+        LocalState.sort = { col, dir: defaultDirForColumn(col, rankMode) };
+      }
+      renderTopTable(agg, rankMode);
+    });
+  });
+
   tbody.innerHTML = top10.map((e, i) => rowHtml(e, i + 1, showPeriods, rankMode)).join("");
+}
+
+/**
+ * Render a sortable <th>. `colKey` is what LocalState.sort.col will be set to.
+ * Adds a small ▲ / ▼ glyph when this is the active sort column.
+ */
+function sortableTh(colKey, label, sortSpec, align, tooltip) {
+  const cls = align === "num" ? "num" : "";
+  const active = sortSpec.col === colKey;
+  const arrow = active ? (sortSpec.dir === "asc" ? " ▲" : " ▼") : "";
+  const cn = `${cls} sortable${active ? " is-active-sort" : ""}`.trim();
+  const tip = tooltip ? ` title="${escapeHtml(tooltip)}"` : "";
+  return `<th class="${cn}" data-sort-col="${escapeHtml(colKey)}"${tip}>${escapeHtml(label)}<span class="sort-arrow">${arrow}</span></th>`;
+}
+
+/**
+ * Default direction when activating a sort column for the first time.
+ *   keyword / category → asc (alphabetical)
+ *   period column      → asc in rank mode, desc in volume mode (i.e., best
+ *                        values first either way)
+ */
+function defaultDirForColumn(col, rankMode) {
+  if (col === "keyword" || col === "category") return "asc";
+  return rankMode ? "asc" : "desc";
+}
+
+/**
+ * Resolve the live LocalState.sort into a (col, dir) pair, falling back to
+ * "default" when the user hasn't picked anything: that's a sort by latest
+ * period with the metric-appropriate direction.
+ */
+function resolveSortSpec(agg, rankMode) {
+  const s = LocalState.sort || { col: null, dir: "auto" };
+  if (s.col) return { col: s.col, dir: s.dir === "auto" ? defaultDirForColumn(s.col, rankMode) : s.dir };
+  return { col: agg.latestPeriod, dir: rankMode ? "asc" : "desc", _isDefault: true };
+}
+
+/**
+ * Sort the entries by the chosen column + direction. Nulls last regardless.
+ */
+function orderEntriesForSort(entries, sortSpec, rankMode) {
+  const { col, dir } = sortSpec;
+  const arr = entries.slice();
+  arr.sort((a, b) => {
+    if (col === "keyword") {
+      const cmp = (a.keyword || "").localeCompare(b.keyword || "");
+      return dir === "asc" ? cmp : -cmp;
+    }
+    if (col === "category") {
+      const cmp = (a.category || "").localeCompare(b.category || "");
+      return dir === "asc" ? cmp : -cmp;
+    }
+    // Period column.
+    const av = a.periodValues.get(col) ?? null;
+    const bv = b.periodValues.get(col) ?? null;
+    if (av == null && bv == null) return (a.keyword || "").localeCompare(b.keyword || "");
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return dir === "asc" ? (av - bv) : (bv - av);
+  });
+  return arr;
 }
 
 function rowHtml(entry, rank, showPeriods, rankMode) {
@@ -653,8 +840,7 @@ function renderTrend(agg, rankMode) {
   const chart = renderLineChart(canvas, {
     labels: agg.periods,
     series,
-    yReverse: false,
-    rankMode,
+    yReverse: rankMode,
     yFormat: "int",
     yTitle: rankMode ? "Search rank (lower = better)" : "Search volume",
     hideLegend: true,
@@ -675,6 +861,8 @@ function openModal() {
   const thead = document.querySelector("#search-full-tbl thead");
   const tbody = document.querySelector("#search-full-tbl tbody");
   const showPeriods = agg.visiblePeriods;
+  const sortSpec = resolveSortSpec(agg, rankMode);
+  const ordered = orderEntriesForSort(agg.sortedEntries, sortSpec, rankMode);
 
   let head = `<tr><th class="rank">#</th><th>Keyword</th><th>Category</th>`;
   for (const p of showPeriods) {
@@ -686,7 +874,7 @@ function openModal() {
   head += `<th class="num">Movement</th></tr>`;
   thead.innerHTML = head;
 
-  tbody.innerHTML = agg.sortedEntries
+  tbody.innerHTML = ordered
     .map((e, i) => rowHtml(e, i + 1, showPeriods, rankMode))
     .join("");
 
@@ -700,6 +888,9 @@ function closeModal() {
  * Downloads
  * ---------------------------------------------------------------- */
 function describeContext(rankMode) {
+  const allCats  = new Set((State.data.metadata.categories || []));
+  const allCatsCovered = LocalState.globalCategories.length === 0
+    || LocalState.globalCategories.length >= allCats.size;
   return {
     "Tab": "Search Movement",
     "View": LocalState.view === "weekly" ? "Weekly" : "Daily",
@@ -707,6 +898,13 @@ function describeContext(rankMode) {
     "Date range": `${LocalState.range.from || "—"} to ${LocalState.range.to || "—"}`,
     "Platforms": LocalState.platforms,
     "Keyword type filter": LocalState.branded,
+    "Categories": allCatsCovered ? "All" : LocalState.globalCategories,
+    "Keywords filter": LocalState.globalKeywords.length === 0
+      ? "All (no filter)"
+      : LocalState.globalKeywords,
+    "Sort": LocalState.sort.col
+      ? `${LocalState.sort.col} (${LocalState.sort.dir})`
+      : `${rankMode ? "rank ascending" : "volume descending"} on ${LocalState.range.to ? "latest period" : "latest period"}`,
     "Generated at": new Date().toISOString(),
   };
 }
@@ -714,7 +912,10 @@ function describeContext(rankMode) {
 function topTableColumnsAndRows(limit) {
   const agg = LocalState._agg;
   if (!agg) return { columns: [], rows: [] };
+  const rankMode = currentRankMode();
   const showPeriods = agg.visiblePeriods;
+  const sortSpec = resolveSortSpec(agg, rankMode);
+  const ordered = orderEntriesForSort(agg.sortedEntries, sortSpec, rankMode);
   const columns = [
     { key: "rank", label: "#" },
     { key: "keyword", label: "Keyword" },
@@ -723,7 +924,7 @@ function topTableColumnsAndRows(limit) {
     ...showPeriods.map(p => ({ key: `p_${p}`, label: p === agg.latestPeriod ? `${p} (latest)` : p })),
     { key: "movement", label: "Movement" },
   ];
-  const entries = limit ? agg.sortedEntries.slice(0, limit) : agg.sortedEntries;
+  const entries = limit ? ordered.slice(0, limit) : ordered;
   const rows = entries.map((e, i) => {
     const row = {
       rank: i + 1,
@@ -803,6 +1004,8 @@ function rawRowsSheet(name) {
   const view = LocalState.view;
   const platSet = new Set(LocalState.platforms);
   const range = LocalState.range;
+  const catSet = setOrNullForAll(LocalState.globalCategories);
+  const kwSet  = setOrNullForAll(LocalState.globalKeywords);
 
   if (view === "weekly") {
     const weeks = State.data.weeks || [];
@@ -825,7 +1028,9 @@ function rawRowsSheet(name) {
     ];
     const rows = (State.data.weekly_sfr || []).filter(r =>
       platSet.has(r.platform) && eligible.has(r.week_num) &&
-      (LocalState.branded === "both" || (r.branded_bucket || "Generic").toLowerCase() === LocalState.branded)
+      (LocalState.branded === "both" || (r.branded_bucket || "Generic").toLowerCase() === LocalState.branded) &&
+      (catSet == null || catSet.has(r.category)) &&
+      (kwSet  == null || kwSet.has(r.search_query))
     );
     return { name, columns: cols, rows };
   }
@@ -841,7 +1046,9 @@ function rawRowsSheet(name) {
   const rows = (State.data.daily_sfr || []).filter(r =>
     platSet.has(r.platform) &&
     (!range.from || r.date >= range.from) &&
-    (!range.to   || r.date <= range.to)
+    (!range.to   || r.date <= range.to) &&
+    (catSet == null || catSet.has(r.category)) &&
+    (kwSet  == null || kwSet.has(r.keyword))
   );
   return { name, columns: cols, rows };
 }
