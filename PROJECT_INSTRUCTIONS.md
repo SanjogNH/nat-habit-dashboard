@@ -318,16 +318,23 @@ Layout for every tab:
      a third time reverts to default sort. A "View full list" button
      opens a modal with all keywords sharing the same column set and
      sort spec.
-  2. **Keyword Trend chart** — rotated multi-keyword overlay. Time runs
-     down the **Y-axis** (oldest period at the top, newest at the
-     bottom); the chosen metric runs along the **X-axis**: rank for
-     Amazon (X-axis reversed so "better" sits on the right) or volume
-     for other platforms (natural X — higher volume on the right).
-     "Better is always to the right" is consistent across both modes.
-     Up to 10 keywords are drawn as separate lines. The chart's own
-     keyword picker (max 10) draws its option list from the keywords
-     that pass the tab-wide Category + Keyword filters. CSV/Excel
-     download of the underlying long-format data.
+  2. **Keyword Trend chart** — multi-keyword overlay across the date range.
+     **X-axis:** week / day labels (time, ascending left → right). **Y-axis:**
+     the metric — rank for Amazon, search volume for other platforms.
+     Neither axis is reversed; the line's direction matches the metric's
+     natural direction:
+     - **Rank mode** (Amazon): lower rank = better, so a **dropping** line
+       means a keyword's rank is improving. The Y-axis does not start at
+       zero — rank values cluster far from zero and a 0-floor would
+       visually compress them.
+     - **Volume mode**: higher = better, so a **rising** line means volume
+       is increasing. Y-axis starts at zero (standard for amount charts).
+     The chart's keyword picker (max 10) draws its option list from the
+     keywords that pass the tab-wide Category + Keyword filters. Tooltip
+     and table movement arrows still read semantically (↑ = improvement
+     regardless of which direction that is for the metric in question),
+     so `↑ 28` on the table still means "rank improved by 28 positions."
+     CSV/Excel download of the underlying long-format data.
 
 ### 5.2 Impressions & Brand Share
 
