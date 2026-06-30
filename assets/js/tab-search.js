@@ -937,15 +937,21 @@ function renderTrend(agg, rankMode) {
     })
     .filter(Boolean);
 
-  // Horizontal/rotated rendering: time on Y (oldest at top → newest at bottom,
-  // since `agg.periods` is in ascending order), metric on X. For Amazon's rank
-  // mode we reverse the X (value) axis so "better" is always toward the right,
-  // matching the volume-mode chart on other platforms.
+  // X-axis: weeks/days (time, ascending left → right).
+  // Y-axis: the metric — rank for Amazon, volume for other platforms.
+  //   - No axis reversal in either mode. The line's direction now matches the
+  //     metric's natural direction: rank improving means the number drops, so
+  //     the line drops; volume improving means it goes up.
+  //   - Rank values cluster far from zero (e.g. 2,000–25,000), so we suppress
+  //     beginAtZero in rank mode to avoid compressing all the data into the
+  //     top of the chart. Volume keeps the standard 0-floor for amount charts.
+  //   - rankMode is still passed through so tooltip + table arrows continue
+  //     to read "↑ = improvement" semantically (rank ↓ in number → ↑ arrow).
   const chart = renderLineChart(canvas, {
     labels: agg.periods,
     series,
-    horizontal: true,
-    yReverse: rankMode,            // reverses the VALUE axis (now X)
+    yReverse: false,
+    yBeginAtZero: !rankMode,
     rankMode,
     yFormat: "int",
     yTitle: rankMode ? "Search rank (lower = better)" : "Search volume",
