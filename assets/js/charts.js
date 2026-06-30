@@ -92,16 +92,18 @@ function _destroyExisting(canvas) {
  * @param {object} opts
  * @param {string[]} opts.labels         category-axis labels (time periods)
  * @param {Array<{label, data}>} opts.series  one entry per line
- * @param {boolean} [opts.yReverse]      true for rank-mode (lower = better);
- *                                       applies to the VALUE axis regardless
- *                                       of orientation (Y in vertical, X in
- *                                       horizontal mode)
+ * @param {boolean} [opts.yReverse]      reverse the value axis (rare — most
+ *                                       charts want natural orientation)
+ * @param {boolean} [opts.yBeginAtZero]  whether the value axis starts at zero.
+ *                                       Defaults to `!yReverse` for backward
+ *                                       compatibility. Set explicitly to
+ *                                       `false` for rank-style charts where
+ *                                       values are clustered far from zero
+ *                                       and a 0-floor would compress them.
  * @param {string}  [opts.yFormat]       "int" | "inr" | "pct" | "roas"
  * @param {string}  [opts.yTitle]        optional value-axis title
  * @param {boolean} [opts.horizontal]    when true, swaps orientation:
- *                                       category axis on Y (time flows top
- *                                       → bottom), value axis on X. Used for
- *                                       the rotated Keyword Trend chart.
+ *                                       category axis on Y, value axis on X.
  * @returns {Chart}
  */
 export function renderLineChart(canvas, opts) {
@@ -113,12 +115,16 @@ export function renderLineChart(canvas, opts) {
   const {
     labels, series,
     yReverse = false,
+    yBeginAtZero,                          // resolved below
     rankMode = false,   // true = lower value is better (rank); flips tooltip delta arrows
     yFormat = "int",
     yTitle = "",
     hideLegend = false,
     horizontal = false,
   } = opts;
+  // Default beginAtZero to !yReverse for backward compat. Callers that want
+  // natural-scale (no-zero-floor) without reversing the axis pass it explicitly.
+  const beginAtZero = (yBeginAtZero === undefined) ? !yReverse : !!yBeginAtZero;
 
   const tickFn = FORMAT_TICKS[yFormat] || tickInt;
   const valueFn = FORMAT_VALUES[yFormat] || fmtInt;
@@ -147,7 +153,7 @@ export function renderLineChart(canvas, opts) {
   // In both modes, `yReverse` applies to the VALUE axis (so "best is up" stays
   // "best is right" when rotated).
   const valueAxisCfg = {
-    beginAtZero: !yReverse,
+    beginAtZero,
     reverse: yReverse,
     grid: { color: "rgba(31,42,34,0.06)" },
     ticks: { font: { size: 11 }, callback: tickFn },
