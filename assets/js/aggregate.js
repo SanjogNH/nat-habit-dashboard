@@ -123,6 +123,38 @@ export function deltaPill(pct) {
   return `<span class="pill ${cls}">${sign} ${Math.abs(pct).toFixed(1)}%</span>`;
 }
 
+/**
+ * Weighted average of `values[i]` weighted by `weights[i]`, skipping any
+ * index where either is null. Pass no weights (or an all-1 array) to get a
+ * plain average-per-period across the range.
+ *
+ * Used for chart headline numbers, which show a weighted average across the
+ * whole selected date range rather than just the most recent period's value:
+ *   - Sum-type metrics (Page Views, Revenue, Impressions, Spend…): weight 1
+ *     per period → simple average per period.
+ *   - Rate-type metrics (Brand Impression Share %, ROAS…): weight by the
+ *     metric's natural denominator (Impressions, Spend…) so periods with
+ *     more underlying volume count for more — avoids Simpson's-paradox-style
+ *     distortion from averaging percentages/ratios naively.
+ *
+ * @param {Array<number|null>} values
+ * @param {Array<number|null>} [weights]  defaults to 1 for every entry
+ * @returns {number|null}
+ */
+export function weightedAverage(values, weights) {
+  let sumW = 0, sumVW = 0, any = false;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    const w = weights ? weights[i] : 1;
+    if (v == null || w == null) continue;
+    sumVW += v * w;
+    sumW += w;
+    any = true;
+  }
+  if (!any || sumW === 0) return null;
+  return sumVW / sumW;
+}
+
 /** Filename-safe timestamp for downloads. */
 export function tsForFilename() {
   const d = new Date();
