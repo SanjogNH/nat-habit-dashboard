@@ -18,8 +18,8 @@ import {
   renderChipsAcrossTab, renderFilterChips,
   buildDateChip, buildMultiSelectChip, buildSegmentChip,
 } from "./filters.js";
-import { renderLineChart, destroyChart, renderSideLegend, PALETTE } from "./charts.js";
-import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
+import { renderLineChart, destroyChart, exportChartImage, renderSideLegend, PALETTE } from "./charts.js";
+import { downloadCSV, downloadXLSX, downloadImage, filterContextSheet } from "./downloads.js";
 import { escapeHtml, fmtInt, toast } from "./util.js";
 
 const RANK_PLATFORMS = new Set(["Amazon"]);
@@ -97,6 +97,7 @@ function buildSkeleton(root) {
           <span class="section-actions">
             <button class="icon-btn" id="search-trend-csv">CSV</button>
             <button class="icon-btn" id="search-trend-xlsx">Excel</button>
+            <button class="icon-btn" id="search-trend-img">Image</button>
           </span>
         </div>
       </header>
@@ -142,6 +143,12 @@ function buildSkeleton(root) {
   document.getElementById("search-full-xlsx").addEventListener("click", () => downloadFullTable("xlsx"));
   document.getElementById("search-trend-csv").addEventListener("click", () => downloadTrend("csv"));
   document.getElementById("search-trend-xlsx").addEventListener("click", () => downloadTrend("xlsx"));
+  document.getElementById("search-trend-img").addEventListener("click", () => {
+    const canvas = document.getElementById("search-trend-canvas");
+    const dataUrl = canvas && exportChartImage(canvas);
+    if (!dataUrl) { toast("Chart isn't ready to export yet."); return; }
+    downloadImage(`nat-habit_search-keyword-trend_${new Date().toISOString().slice(0,10)}.png`, dataUrl);
+  });
 }
 
 /* ---------------------------------------------------------------- *
