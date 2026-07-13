@@ -242,6 +242,43 @@ export function destroyChart(canvas) {
 }
 
 /**
+ * Export the live Chart.js instance on a canvas as a PNG data URL, for the
+ * "Image" download button that sits alongside CSV/Excel on every chart.
+ *
+ * Checks our own instance map first (charts built via renderLineChart), then
+ * falls back to Chart.js's own registry (covers charts built directly with
+ * `new Chart()`, e.g. tab-spend's renderColoredLineChart).
+ *
+ * Chart.js canvases have a transparent background by default, which renders
+ * as black/blank in some external viewers. We composite the chart onto a
+ * brand-background canvas before exporting so the PNG looks right anywhere.
+ *
+ * @param {HTMLCanvasElement} canvas
+ * @param {object} [opts]
+ * @param {string} [opts.bg="#FDFBF7"]  background fill to composite under
+ * @returns {string|null} PNG data URL, or null if no chart is bound.
+ */
+export function exportChartImage(canvas, opts = {}) {
+  if (!canvas) return null;
+  const { bg = "#FDFBF7" } = opts;
+  let chart = _instances.get(canvas);
+  if (!chart && typeof window.Chart !== "undefined" && window.Chart.getChart) {
+    chart = window.Chart.getChart(canvas);
+  }
+  if (!chart || !chart.canvas) return null;
+
+  const src = chart.canvas;
+  const out = document.createElement("canvas");
+  out.width = src.width;
+  out.height = src.height;
+  const ctx = out.getContext("2d");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(src, 0, 0);
+  return out.toDataURL("image/png", 1);
+}
+
+/**
  * Render a custom side-legend for a Chart.js instance. Used when the default
  * top legend would wrap into many rows (e.g. SKU Impressions, Keyword Trend
  * where labels are long product names).
