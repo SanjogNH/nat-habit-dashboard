@@ -17,12 +17,12 @@ import {
   createDateRange, createSegmented, createMultiSelect,
   renderChipsAcrossTab, buildDateChip, buildMultiSelectChip, buildSegmentChip,
 } from "./filters.js";
-import { renderLineChart, destroyChart } from "./charts.js";
-import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
+import { renderLineChart, destroyChart, exportChartImage, PALETTE } from "./charts.js";
+import { downloadCSV, downloadXLSX, downloadImage, filterContextSheet } from "./downloads.js";
 import { escapeHtml, fmtInt, fmtINR, fmtDelta, pctChange, toast , makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
 import {
   bucketKey, enumeratePeriods,
-  lastIndexWithData, findPrevWithData,
+  lastIndexWithData, findPrevWithData, weightedAverage,
   pluralize, deltaPill, tsForFilename,
 } from "./aggregate.js";
 
@@ -105,6 +105,7 @@ function buildSkeleton(root) {
           <span class="section-meta" id="bus-${m.key}-meta"></span>
           <button class="icon-btn" data-dl="csv" data-metric="${m.key}">CSV</button>
           <button class="icon-btn" data-dl="xlsx" data-metric="${m.key}">Excel</button>
+          <button class="icon-btn" data-dl="img" data-metric="${m.key}">Image</button>
         </div>
       </header>
       <div class="chart-box"><canvas id="bus-${m.key}-canvas"></canvas></div>
@@ -118,25 +119,58 @@ function buildSkeleton(root) {
     </section>
   `).join("");
 
+  const customBuilder = `
+    <section class="section-card" id="bus-custom-builder">
+      <header class="section-head">
+        <h2 class="section-title">Custom Graph Builder
+          <span class="section-meta" id="bus-custom-kpi"></span>
+        </h2>
+        <div class="section-actions">
+          <span class="section-meta" id="bus-custom-meta"></span>
+          <button class="icon-btn" data-dl="csv" data-metric="custom">CSV</button>
+          <button class="icon-btn" data-dl="xlsx" data-metric="custom">Excel</button>
+          <button class="icon-btn" data-dl="img" data-metric="custom">Image</button>
+        </div>
+      </header>
+      <p class="section-meta" style="margin:-8px 0 14px;">
+        Pick any combination of metrics and a time grain. Uses the Platforms filter above; always combined across all categories/SKUs.
+      </p>
+      <div class="filter-bar" id="bus-custom-filters" style="margin-bottom:16px;"></div>
+      <div class="chart-box"><canvas id="bus-custom-canvas"></canvas></div>
+      <div class="tbl-wrap is-scroll-y">
+        <table class="data-tbl" id="bus-custom-tbl">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty-state" id="bus-custom-empty" hidden>Pick at least one metric above to plot.</div>
+    </section>
+  `;
+
   root.innerHTML = `
     <div id="bus-overlay" class="bus-overlay" hidden>
       <div class="boot-spinner" aria-hidden="true"></div>
       <p id="bus-overlay-msg" class="boot-msg">Loading…</p>
     </div>
     ${sections}
+    ${customBuilder}
   `;
 
-  // Wire download buttons.
+  // Wire download buttons (four metric cards + the custom builder card).
   root.querySelectorAll("[data-dl]").forEach(btn => {
     btn.addEventListener("click", () => {
       const metric = btn.dataset.metric;
       const kind = btn.dataset.dl;
+      if (metric === "custom") { downloadCustom(kind); return; }
+      if (kind === "img") { downloadMetricImage(metric); return; }
       downloadMetric(metric, kind);
     });
   });
 
   // Collapse all time-series breakdown tables by default (each section card has one).
   root.querySelectorAll(".section-card > .tbl-wrap").forEach(el => makeTableCollapsible(el));
+
+  buildCustomBuilderFilters();
 }
 
 /* ---------------------------------------------------------------- *
@@ -256,6 +290,7 @@ function rerender() {
   const agg = computeAggregations();
   LocalState._agg = agg;
   for (const m of METRICS) renderMetricPanel(m, agg);
+  renderCustomBuilder();
   // Update collapsed-table summary labels to reflect new row counts.
   syncTableCollapseLabels(document.getElementById("content-business"));
   // Active-filter chips above each table.
@@ -530,22 +565,26 @@ function renderMetricPanel(metric, agg) {
   });
   const labels = periods.map(p => p.label);
 
-  // Latest = last period with data; previous = the period chronologically before it.
-  const valIdx = lastIndexWithData(values);
-  const latestVal = valIdx >= 0 ? values[valIdx] : null;
-  const prevIdxScan = findPrevWithData(values, valIdx);
-  const prevVal = prevIdxScan >= 0 ? values[prevIdxScan] : null;
-  const delta = pctChange(latestVal, prevVal);
+  // Headline = weighted average across the whole selected range, not just
+  // the latest period. These are all sum-per-period metrics, so the weight
+  // is 1 per period (a straight average-per-period); see aggregate.js.
+  const rangeAvg = weightedAverage(values);
+  // Still show a trend arrow: average of the first half of the range vs the
+  // second half, so the headline retains a sense of direction.
+  const mid = Math.ceil(values.length / 2);
+  const firstHalfAvg = weightedAverage(values.slice(0, mid));
+  const secondHalfAvg = weightedAverage(values.slice(mid));
+  const delta = pctChange(secondHalfAvg, firstHalfAvg);
 
-  if (latestVal == null) {
+  if (rangeAvg == null) {
     kpiEl.innerHTML = `<span style="color:var(--brand-muted-2)">No data in range</span>`;
   } else {
     const periodName = ({daily:"day", weekly:"week", monthly:"month"})[LocalState.gran] || "period";
     const deltaPart = delta == null
-      ? `<span style="color:var(--brand-muted-2); margin-left:8px;">no prior ${periodName}</span>`
+      ? ""
       : `<span class="${delta > 0 ? "delta-up" : (delta < 0 ? "delta-down" : "")}" style="margin-left:8px;">${
             delta > 0 ? "▲" : (delta < 0 ? "▼" : "→")} ${Math.abs(delta).toFixed(1)}%</span>`;
-    kpiEl.innerHTML = `<span class="kpi-val">${metric.fmt(latestVal)}</span>${deltaPart}`;
+    kpiEl.innerHTML = `<span class="kpi-val">${metric.fmt(rangeAvg)}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">avg/${periodName}</span>${deltaPart}`;
   }
   metaEl.textContent = `${periods.length} ${pluralize(LocalState.gran, periods.length)}`;
 
@@ -615,6 +654,13 @@ function describeContext() {
     "Dimension": (LocalState.level === "overall" || useAll) ? "All combined" : dimDisplay,
     "Generated at": new Date().toISOString(),
   };
+}
+
+function downloadMetricImage(metricKey) {
+  const canvas = document.getElementById(`bus-${metricKey}-canvas`);
+  const dataUrl = canvas && exportChartImage(canvas);
+  if (!dataUrl) { toast("Chart isn't ready to export yet."); return; }
+  downloadImage(`nat-habit_business-${metricKey}_${ts()}.png`, dataUrl);
 }
 
 function downloadMetric(metricKey, kind) {
@@ -700,4 +746,322 @@ function rawRowsSheet(metricKey) {
       (level === "sku"         && dimSet.has(r.nh_sku))
     )));
   return { name: "Filtered sales rows", columns: cols, rows };
+}
+
+/* ================================================================== *
+ * Custom Graph Builder
+ *
+ * A self-contained mini-tool at the bottom of the Business tab: pick any
+ * combination of the four Business metrics, a time grain, and a date range,
+ * and see them plotted together. Always combined across all
+ * categories/SKUs (Overall level) — it respects the tab's Platforms filter
+ * so it stays consistent with everything above it, but doesn't try to
+ * replicate the dimension-slicing UI for simplicity.
+ *
+ * Metrics with different units get a second (right-hand) y-axis — Page
+ * Views + Units share the "int" axis, Revenue + Spend share the "inr" axis.
+ * ================================================================== */
+const CustomBuilder = {
+  range: { from: "", to: "" },
+  gran: "weekly",
+  metrics: ["revenue", "units"],   // sensible default pairing
+  filters: null,
+  _agg: null,
+};
+
+function buildCustomBuilderFilters() {
+  const bar = document.getElementById("bus-custom-filters");
+  if (!bar) return;
+  bar.innerHTML = "";
+
+  const md = State.data.metadata;
+  const dr = md.date_range || {};
+
+  const dateF = createDateRange({
+    id: "business.custom.range",
+    minDate: dr.min,
+    maxDate: dr.max,
+    defaultDays: 90,
+  });
+  bar.appendChild(dateF.el);
+
+  const granF = createSegmented({
+    id: "business.custom.gran",
+    label: "Granularity",
+    options: [
+      { value: "daily", label: "Daily" },
+      { value: "weekly", label: "Weekly" },
+      { value: "monthly", label: "Monthly" },
+    ],
+    defaultValue: "weekly",
+  });
+  bar.appendChild(granF.el);
+
+  const metricOptions = METRICS.map(m => ({ value: m.key, label: m.label }));
+  const metricsF = createMultiSelect({
+    id: "business.custom.metrics",
+    label: "Metrics",
+    options: metricOptions,
+    defaultSelected: CustomBuilder.metrics,
+    allowAll: false,
+  });
+  bar.appendChild(metricsF.el);
+
+  CustomBuilder.filters = { dateF, granF, metricsF };
+
+  const sync = () => {
+    CustomBuilder.range = dateF.getRange();
+    CustomBuilder.gran = granF.getValue();
+    CustomBuilder.metrics = metricsF.getSelected();
+  };
+  sync();
+  dateF.onChange(() => { sync(); renderCustomBuilder(); });
+  granF.onChange(() => { sync(); renderCustomBuilder(); });
+  metricsF.onChange(() => { sync(); renderCustomBuilder(); });
+}
+
+function computeCustomAggregation() {
+  const { range, gran, metrics } = CustomBuilder;
+  const platSet = new Set(LocalState.platforms);
+  const wantsSpend = metrics.includes("spend");
+  const wantsSales = metrics.some(m => m !== "spend");
+
+  const periodList = enumeratePeriods(range.from, range.to, gran);
+  const periodMap = new Map(periodList.map(p => [p.key, {
+    key: p.key, label: p.label,
+    page_views: null, units: null, revenue: null, spend: null,
+    hasSales: false, hasSpend: false,
+  }]));
+
+  if (wantsSales) {
+    for (const r of (LocalState.salesRows || [])) {
+      if (!platSet.has(r.platform)) continue;
+      if (range.from && r.date < range.from) continue;
+      if (range.to   && r.date > range.to)   continue;
+      const e = periodMap.get(bucketKey(r.date, gran));
+      if (!e) continue;
+      if (!e.hasSales) { e.page_views = 0; e.units = 0; e.revenue = 0; e.hasSales = true; }
+      e.page_views += +r.glance_views || 0;
+      e.units      += +r.gross_units  || 0;
+      e.revenue    += +r.revenue      || 0;
+    }
+  }
+  if (wantsSpend) {
+    for (const r of (State.data.bcg_spend || [])) {
+      if (!platSet.has(r.platform)) continue;
+      if (range.from && r.date < range.from) continue;
+      if (range.to   && r.date > range.to)   continue;
+      const e = periodMap.get(bucketKey(r.date, gran));
+      if (!e) continue;
+      if (!e.hasSpend) { e.spend = 0; e.hasSpend = true; }
+      e.spend += +r.spend || 0;
+    }
+  }
+
+  return { periods: periodList.map(p => periodMap.get(p.key)) };
+}
+
+function renderCustomBuilder() {
+  if (!LocalState.salesRows) return;   // sales.json not loaded yet
+  const agg = computeCustomAggregation();
+  CustomBuilder._agg = agg;
+
+  const canvas = document.getElementById("bus-custom-canvas");
+  const thead = document.querySelector("#bus-custom-tbl thead");
+  const tbody = document.querySelector("#bus-custom-tbl tbody");
+  const empty = document.getElementById("bus-custom-empty");
+  const kpiEl = document.getElementById("bus-custom-kpi");
+  const metaEl = document.getElementById("bus-custom-meta");
+  const wrap = document.querySelector("#bus-custom-builder .chart-box");
+  const tblWrap = document.querySelector("#bus-custom-builder .tbl-wrap");
+
+  const selectedMetrics = METRICS.filter(m => CustomBuilder.metrics.includes(m.key));
+  if (!selectedMetrics.length) {
+    destroyChart(canvas);
+    wrap.style.display = "none";
+    tblWrap.style.display = "none";
+    empty.hidden = false;
+    kpiEl.textContent = "";
+    metaEl.textContent = "";
+    return;
+  }
+  wrap.style.display = "";
+  tblWrap.style.display = "";
+  empty.hidden = true;
+
+  const labels = agg.periods.map(p => p.label);
+  const series = selectedMetrics.map(m => ({
+    label: m.label,
+    yFormat: m.yFormat,
+    data: agg.periods.map(p => {
+      if (m.key === "spend") return p.hasSpend ? p.spend : null;
+      return p.hasSales ? p[m.key] : null;
+    }),
+  }));
+
+  renderCustomChart(canvas, { labels, series });
+
+  const periodName = ({daily:"day", weekly:"week", monthly:"month"})[CustomBuilder.gran] || "period";
+  kpiEl.textContent = `${selectedMetrics.length} metric${selectedMetrics.length === 1 ? "" : "s"}`;
+  metaEl.textContent = `${agg.periods.length} ${pluralize(CustomBuilder.gran, agg.periods.length)}`;
+
+  // Table: one row per period, one column pair per selected metric.
+  let head = `<tr><th>Period</th>`;
+  for (const m of selectedMetrics) head += `<th class="num">${escapeHtml(m.label)}</th>`;
+  head += `</tr>`;
+  thead.innerHTML = head;
+
+  const rowsHTML = [];
+  for (let i = agg.periods.length - 1; i >= 0; i--) {
+    const p = agg.periods[i];
+    let row = `<tr><td><strong>${escapeHtml(p.label)}</strong></td>`;
+    for (const m of selectedMetrics) {
+      const v = m.key === "spend" ? (p.hasSpend ? p.spend : null) : (p.hasSales ? p[m.key] : null);
+      row += `<td class="num mono">${v == null ? "—" : m.fmt(v)}</td>`;
+    }
+    row += `</tr>`;
+    rowsHTML.push(row);
+  }
+  tbody.innerHTML = rowsHTML.join("") || `<tr><td colspan="${selectedMetrics.length + 1}" class="empty-state">No periods in range.</td></tr>`;
+}
+
+/**
+ * Multi-metric, dual-axis line chart for the custom builder. Metrics with
+ * yFormat "int" (Page Views, Units) share the left axis; "inr" metrics
+ * (Revenue, Spend) get their own right-hand axis so scales don't collide.
+ */
+function renderCustomChart(canvas, { labels, series }) {
+  destroyChart(canvas);
+  if (typeof window.Chart === "undefined") return null;
+
+  const formatsUsed = [...new Set(series.map(s => s.yFormat))];
+  const axisFor = new Map(formatsUsed.map((f, i) => [f, i === 0 ? "y" : "y1"]));
+  const axisTitle = { int: "Count", inr: "₹" };
+
+  const tick = (fmt) => (v) => {
+    const abs = Math.abs(v);
+    const prefix = fmt === "inr" ? "₹" : "";
+    if (abs >= 1e7) return `${prefix}${(v / 1e7).toFixed(1)}Cr`;
+    if (abs >= 1e5) return `${prefix}${(v / 1e5).toFixed(1)}L`;
+    if (abs >= 1000) return `${prefix}${(v / 1000).toFixed(1)}K`;
+    return `${prefix}${Number(v).toLocaleString("en-IN")}`;
+  };
+  const valueFn = (fmt) => (v) => v == null ? "—" : (fmt === "inr" ? fmtINR(v) : fmtInt(v));
+
+  const datasets = series.map((s, i) => {
+    const color = PALETTE[i % PALETTE.length];
+    return {
+      label: s.label,
+      data: s.data,
+      borderColor: color,
+      backgroundColor: color + "22",
+      borderWidth: 2.2,
+      tension: 0.3,
+      pointRadius: 3,
+      pointHoverRadius: 5,
+      pointBackgroundColor: color,
+      pointBorderColor: color,
+      fill: false,
+      spanGaps: true,
+      yAxisID: axisFor.get(s.yFormat),
+    };
+  });
+
+  const scales = {
+    x: {
+      grid: { display: false },
+      ticks: { maxRotation: 0, autoSkip: true, autoSkipPadding: 12, font: { size: 11 } },
+    },
+    y: {
+      position: "left",
+      beginAtZero: true,
+      grid: { color: "rgba(31,42,34,0.06)" },
+      ticks: { font: { size: 11 }, callback: tick(formatsUsed[0]) },
+      title: { display: true, text: axisTitle[formatsUsed[0]] || "", font: { size: 11, weight: 600 }, color: "#7A7268" },
+    },
+  };
+  if (formatsUsed[1]) {
+    scales.y1 = {
+      position: "right",
+      beginAtZero: true,
+      grid: { drawOnChartArea: false },
+      ticks: { font: { size: 11 }, callback: tick(formatsUsed[1]) },
+      title: { display: true, text: axisTitle[formatsUsed[1]] || "", font: { size: 11, weight: 600 }, color: "#7A7268" },
+    };
+  }
+
+  return new Chart(canvas, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: {
+          position: "top", align: "end",
+          labels: { boxWidth: 8, boxHeight: 8, padding: 14, font: { size: 12, weight: 600 }, usePointStyle: true },
+        },
+        tooltip: {
+          backgroundColor: "rgba(31,42,34,0.95)",
+          titleColor: "#fff", bodyColor: "#fff",
+          padding: 10, cornerRadius: 8, displayColors: true,
+          boxPadding: 4, boxWidth: 6, boxHeight: 6,
+          callbacks: {
+            label(ctx) {
+              const s = series[ctx.datasetIndex];
+              const v = ctx.parsed.y;
+              return `${ctx.dataset.label}: ${valueFn(s.yFormat)(v)}`;
+            },
+          },
+        },
+      },
+      scales,
+    },
+  });
+}
+
+function describeCustomContext() {
+  return {
+    "Tab": "Business — Custom Graph Builder",
+    "Granularity": CustomBuilder.gran,
+    "Date range": `${CustomBuilder.range.from || "—"} to ${CustomBuilder.range.to || "—"}`,
+    "Platforms": LocalState.platforms,
+    "Metrics": CustomBuilder.metrics,
+    "Generated at": new Date().toISOString(),
+  };
+}
+
+function downloadCustom(kind) {
+  const agg = CustomBuilder._agg;
+  const selectedMetrics = METRICS.filter(m => CustomBuilder.metrics.includes(m.key));
+  if (!agg || !selectedMetrics.length || !agg.periods.length) {
+    toast("Nothing to download — pick at least one metric.");
+    return;
+  }
+  if (kind === "img") {
+    const canvas = document.getElementById("bus-custom-canvas");
+    const dataUrl = canvas && exportChartImage(canvas);
+    if (!dataUrl) { toast("Chart isn't ready to export yet."); return; }
+    downloadImage(`nat-habit_business-custom_${ts()}.png`, dataUrl);
+    return;
+  }
+
+  const cols = [{ key: "period", label: "Period" }];
+  for (const m of selectedMetrics) cols.push({ key: m.key, label: m.label });
+  const rows = agg.periods.map(p => {
+    const row = { period: p.label };
+    for (const m of selectedMetrics) {
+      const v = m.key === "spend" ? (p.hasSpend ? p.spend : null) : (p.hasSales ? p[m.key] : null);
+      row[m.key] = v == null ? "" : v;
+    }
+    return row;
+  }).reverse();
+
+  const fname = `nat-habit_business-custom_${ts()}`;
+  if (kind === "csv") { downloadCSV(`${fname}.csv`, cols, rows); return; }
+  downloadXLSX(`${fname}.xlsx`, [
+    { name: "Custom graph", columns: cols, rows },
+    filterContextSheet("Filter context", describeCustomContext()),
+  ]);
 }
