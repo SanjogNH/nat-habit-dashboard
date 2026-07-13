@@ -19,11 +19,11 @@ import {
   createDateRange, createSegmented, createMultiSelect,
   renderChipsAcrossTab, buildDateChip, buildMultiSelectChip, buildSegmentChip,
 } from "./filters.js";
-import { renderLineChart, destroyChart, PALETTE } from "./charts.js";
-import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
+import { renderLineChart, destroyChart, exportChartImage, PALETTE } from "./charts.js";
+import { downloadCSV, downloadXLSX, downloadImage, filterContextSheet } from "./downloads.js";
 import { escapeHtml, fmtINR, fmtROAS, pctChange, toast , makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
 import {
-  bucketKey, enumeratePeriods, pluralize, deltaPill, tsForFilename,
+  bucketKey, enumeratePeriods, weightedAverage, pluralize, deltaPill, tsForFilename,
 } from "./aggregate.js";
 
 /* ---------------------------------------------------------------- *
@@ -115,6 +115,7 @@ function buildSkeleton(root) {
           <span class="section-meta" id="spd-${m.key}-meta"></span>
           <button class="icon-btn" data-dl="csv" data-metric="${m.key}">CSV</button>
           <button class="icon-btn" data-dl="xlsx" data-metric="${m.key}">Excel</button>
+          <button class="icon-btn" data-dl="img" data-metric="${m.key}">Image</button>
         </div>
       </header>
       <div class="chart-box"><canvas id="spd-${m.key}-canvas"></canvas></div>
@@ -129,12 +130,20 @@ function buildSkeleton(root) {
 
   root.querySelectorAll("[data-dl]").forEach(btn => {
     btn.addEventListener("click", () => {
+      if (btn.dataset.dl === "img") { downloadMetricImage(btn.dataset.metric); return; }
       downloadMetric(btn.dataset.metric, btn.dataset.dl);
     });
   });
 
   // Collapse all per-period breakdown tables by default.
   root.querySelectorAll(".section-card > .tbl-wrap").forEach(el => makeTableCollapsible(el));
+}
+
+function downloadMetricImage(metricKey) {
+  const canvas = document.getElementById(`spd-${metricKey}-canvas`);
+  const dataUrl = canvas && exportChartImage(canvas);
+  if (!dataUrl) { toast("Chart isn't ready to export yet."); return; }
+  downloadImage(`nat-habit_spend-${metricKey}_${tsForFilename()}.png`, dataUrl);
 }
 
 /* ---------------------------------------------------------------- *
@@ -479,25 +488,35 @@ function renderMetricPanel(metric, agg) {
     yTitle: metric.yTitle,
   });
 
-  // Header KPI shows the Total branch's latest value + Δ vs previous.
+  // Headline = weighted average across the whole selected range (Total
+  // branch). Spend/Sales are sum-per-period metrics, so weight 1 per period.
+  // ROAS is a ratio, so it's weighted by that period's Spend — equivalent to
+  // Σ Sales ÷ Σ Spend across the range — rather than a naive mean of ratios.
   const totals = agg.periods.map(p => metric.pick(p.total));
-  const latIdx = (() => {
-    for (let i = totals.length - 1; i >= 0; i--) if (totals[i] != null) return i;
-    return -1;
-  })();
-  const latestVal = latIdx >= 0 ? totals[latIdx] : null;
-  const prevVal   = latIdx > 0  ? totals[latIdx - 1] : null;
-  const delta = pctChange(latestVal, prevVal);
+  const spendTotals = agg.periods.map(p => p.total.spend);
+  const rangeAvg = metric.key === "roas"
+    ? weightedAverage(totals, spendTotals)
+    : weightedAverage(totals);
 
-  if (latestVal == null) {
+  const mid = Math.ceil(totals.length / 2);
+  const firstHalf = metric.key === "roas"
+    ? weightedAverage(totals.slice(0, mid), spendTotals.slice(0, mid))
+    : weightedAverage(totals.slice(0, mid));
+  const secondHalf = metric.key === "roas"
+    ? weightedAverage(totals.slice(mid), spendTotals.slice(mid))
+    : weightedAverage(totals.slice(mid));
+  const delta = pctChange(secondHalf, firstHalf);
+
+  if (rangeAvg == null) {
     kpiEl.innerHTML = `<span style="color:var(--brand-muted-2)">No data in range</span>`;
   } else {
     const periodName = ({daily:"day", weekly:"week", monthly:"month"})[LocalState.gran] || "period";
     const deltaPart = delta == null
-      ? `<span style="color:var(--brand-muted-2); margin-left:8px;">no prior ${periodName}</span>`
+      ? ""
       : `<span class="${delta > 0 ? "delta-up" : (delta < 0 ? "delta-down" : "")}" style="margin-left:8px;">${
             delta > 0 ? "▲" : (delta < 0 ? "▼" : "→")} ${Math.abs(delta).toFixed(1)}%</span>`;
-    kpiEl.innerHTML = `<span class="kpi-val">${metric.fmt(latestVal)}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">total</span>${deltaPart}`;
+    const suffix = metric.key === "roas" ? "avg" : `avg/${periodName}`;
+    kpiEl.innerHTML = `<span class="kpi-val">${metric.fmt(rangeAvg)}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">total · ${suffix}</span>${deltaPart}`;
   }
   metaEl.textContent = `${agg.periods.length} ${pluralize(LocalState.gran, agg.periods.length)}`;
 
