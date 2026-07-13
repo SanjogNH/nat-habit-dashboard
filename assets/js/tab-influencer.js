@@ -30,12 +30,12 @@ import {
   createDateRange, createMultiSelect,
   renderChipsAcrossTab, buildDateChip, buildMultiSelectChip,
 } from "./filters.js";
-import { renderLineChart, destroyChart, PALETTE } from "./charts.js";
-import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
+import { renderLineChart, destroyChart, exportChartImage, PALETTE } from "./charts.js";
+import { downloadCSV, downloadXLSX, downloadImage, filterContextSheet } from "./downloads.js";
 import { escapeHtml, fmtInt, fmtINR, pctChange, toast , makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
 import {
   enumeratePeriods, pluralize, deltaPill, tsForFilename,
-  lastIndexWithData, findPrevWithData,
+  lastIndexWithData, findPrevWithData, weightedAverage,
 } from "./aggregate.js";
 
 /* ---------------------------------------------------------------- *
@@ -109,6 +109,7 @@ function buildSkeleton(root) {
           <span class="section-meta" id="inf-${m.key}-meta"></span>
           <button class="icon-btn" data-dl="csv" data-metric="${m.key}">CSV</button>
           <button class="icon-btn" data-dl="xlsx" data-metric="${m.key}">Excel</button>
+          <button class="icon-btn" data-dl="img" data-metric="${m.key}">Image</button>
         </div>
       </header>
       <div class="chart-box"><canvas id="inf-${m.key}-canvas"></canvas></div>
@@ -163,6 +164,7 @@ function buildSkeleton(root) {
         </h2>
         <div class="section-actions">
           <span class="section-meta" id="inf-overlay-imp-meta"></span>
+          <button class="icon-btn" data-dl="img" data-metric="overlay-imp">Image</button>
         </div>
       </header>
       <div class="chart-box is-tall"><canvas id="inf-overlay-imp-canvas"></canvas></div>
@@ -174,6 +176,7 @@ function buildSkeleton(root) {
         </h2>
         <div class="section-actions">
           <span class="section-meta" id="inf-overlay-kw-meta"></span>
+          <button class="icon-btn" data-dl="img" data-metric="overlay-kw">Image</button>
         </div>
       </header>
       <div class="chart-box is-tall"><canvas id="inf-overlay-kw-canvas"></canvas></div>
@@ -182,6 +185,7 @@ function buildSkeleton(root) {
 
   root.querySelectorAll("[data-dl]").forEach(btn => {
     btn.addEventListener("click", () => {
+      if (btn.dataset.dl === "img") { downloadMetricImage(btn.dataset.metric); return; }
       downloadMetric(btn.dataset.metric, btn.dataset.dl);
     });
   });
@@ -570,6 +574,18 @@ function weekContaining(dateISO, weeks) {
   return null;
 }
 
+const CANVAS_ID_BY_METRIC = {
+  "overlay-imp": "inf-overlay-imp-canvas",
+  "overlay-kw": "inf-overlay-kw-canvas",
+};
+function downloadMetricImage(metricKey) {
+  const canvasId = CANVAS_ID_BY_METRIC[metricKey] || `inf-${metricKey}-canvas`;
+  const canvas = document.getElementById(canvasId);
+  const dataUrl = canvas && exportChartImage(canvas);
+  if (!dataUrl) { toast("Chart isn't ready to export yet."); return; }
+  downloadImage(`nat-habit_influencer-${metricKey}_${tsForFilename()}.png`, dataUrl);
+}
+
 /* ---------------------------------------------------------------- *
  * Render — campaign performance per metric
  * ---------------------------------------------------------------- */
@@ -588,19 +604,19 @@ function renderCampaignPanel(metric, agg) {
     yFormat: metric.yFormat, yTitle: metric.label,
   });
 
-  const latIdx = lastIndexWithData(values);
-  const prevIdx = findPrevWithData(values, latIdx);
-  const latestVal = latIdx >= 0 ? values[latIdx] : null;
-  const prevVal   = prevIdx >= 0 ? values[prevIdx] : null;
-  const delta = pctChange(latestVal, prevVal);
-  if (latestVal == null) {
+  const rangeAvg = weightedAverage(values);
+  const mid = Math.ceil(values.length / 2);
+  const firstHalf = weightedAverage(values.slice(0, mid));
+  const secondHalf = weightedAverage(values.slice(mid));
+  const delta = pctChange(secondHalf, firstHalf);
+  if (rangeAvg == null) {
     kpiEl.innerHTML = `<span style="color:var(--brand-muted-2)">No campaigns in range</span>`;
   } else {
     const dpart = delta == null
-      ? `<span style="color:var(--brand-muted-2); margin-left:8px;">no prior day</span>`
+      ? ""
       : `<span class="${delta > 0 ? "delta-up" : (delta < 0 ? "delta-down" : "")}" style="margin-left:8px;">${
             delta > 0 ? "▲" : (delta < 0 ? "▼" : "→")} ${Math.abs(delta).toFixed(1)}%</span>`;
-    kpiEl.innerHTML = `<span class="kpi-val">${metric.fmt(latestVal)}</span>${dpart}`;
+    kpiEl.innerHTML = `<span class="kpi-val">${metric.fmt(rangeAvg)}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">avg/day</span>${dpart}`;
   }
   metaEl.textContent = `${agg.periods.length} ${pluralize("daily", agg.periods.length)} · ${agg.rawRowCount} campaign rows`;
 
@@ -688,9 +704,9 @@ function renderOverlayImpressions(overlay) {
     yFormat: "int", yTitle: "Impressions",
     markers: overlay.markers,
   });
-  const latIdx = lastIndexWithData(values);
-  if (latIdx >= 0) {
-    kpi.innerHTML = `<span class="kpi-val">${fmtInt(values[latIdx])}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">${escapeHtml(overlay.weeks[latIdx].label)}</span>`;
+  const rangeAvg = weightedAverage(values);
+  if (rangeAvg != null) {
+    kpi.innerHTML = `<span class="kpi-val">${fmtInt(rangeAvg)}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">avg/week</span>`;
   } else {
     kpi.innerHTML = `<span style="color:var(--brand-muted-2)">No impressions in selected categories</span>`;
   }
