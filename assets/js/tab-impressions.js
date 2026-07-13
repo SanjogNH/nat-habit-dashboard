@@ -22,11 +22,11 @@ import {
   createDateRange, createMultiSelect, createSegmented,
   renderChipsAcrossTab, buildDateChip, buildMultiSelectChip, buildSegmentChip,
 } from "./filters.js";
-import { renderLineChart, destroyChart, renderSideLegend, PALETTE } from "./charts.js";
-import { downloadCSV, downloadXLSX, filterContextSheet } from "./downloads.js";
+import { renderLineChart, destroyChart, exportChartImage, renderSideLegend, PALETTE } from "./charts.js";
+import { downloadCSV, downloadXLSX, downloadImage, filterContextSheet } from "./downloads.js";
 import { escapeHtml, fmtInt, pctChange, toast , makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
 import {
-  pluralize, deltaPill, tsForFilename,
+  pluralize, deltaPill, tsForFilename, weightedAverage,
 } from "./aggregate.js";
 
 /* ---------------------------------------------------------------- *
@@ -122,6 +122,7 @@ function buildSkeleton(root) {
           <span class="section-meta" id="imp-${m.key}-meta"></span>
           <button class="icon-btn" data-dl="csv" data-metric="${m.key}">CSV</button>
           <button class="icon-btn" data-dl="xlsx" data-metric="${m.key}">Excel</button>
+          <button class="icon-btn" data-dl="img" data-metric="${m.key}">Image</button>
         </div>
       </header>
       <div class="chart-box"><canvas id="imp-${m.key}-canvas"></canvas></div>
@@ -149,6 +150,7 @@ function buildSkeleton(root) {
           <span class="section-actions">
             <button class="icon-btn" data-dl="csv" data-metric="sku">CSV</button>
             <button class="icon-btn" data-dl="xlsx" data-metric="sku">Excel</button>
+            <button class="icon-btn" data-dl="img" data-metric="sku">Image</button>
           </span>
         </div>
       </header>
@@ -166,6 +168,7 @@ function buildSkeleton(root) {
 
   root.querySelectorAll("[data-dl]").forEach(btn => {
     btn.addEventListener("click", () => {
+      if (btn.dataset.dl === "img") { downloadMetricImage(btn.dataset.metric); return; }
       downloadMetric(btn.dataset.metric, btn.dataset.dl);
     });
   });
@@ -530,19 +533,32 @@ function renderKeywordPanel(metric, agg) {
     yTitle: metric.yTitle,
   });
 
-  const latIdx = lastIndexNonNull(values);
-  const prevIdx = latIdx > 0 ? prevNonNull(values, latIdx) : -1;
-  const latestVal = latIdx >= 0 ? values[latIdx] : null;
-  const prevVal   = prevIdx >= 0 ? values[prevIdx] : null;
-  const delta = pctChange(latestVal, prevVal);
-  if (latestVal == null) {
+  // Headline = weighted average across the whole selected range.
+  //   - Impressions / Clicks (sum-per-week): weight 1 per week.
+  //   - Brand Impression/Click Share % (rate): weighted by that week's
+  //     underlying Impressions/Clicks total — i.e. Σ(share×weight)/Σ(weight),
+  //     equivalent to recomputing the true weighted share over the range.
+  const weightKey = metric.key === "brand_imp_share" ? "impressions"
+    : metric.key === "brand_click_share" ? "clicks"
+    : null;
+  const weights = weightKey ? agg.periods.map(p => p[weightKey]) : undefined;
+  const rangeAvg = weightedAverage(values, weights);
+
+  const mid = Math.ceil(values.length / 2);
+  const wFirst = weights ? weights.slice(0, mid) : undefined;
+  const wSecond = weights ? weights.slice(mid) : undefined;
+  const firstHalf = weightedAverage(values.slice(0, mid), wFirst);
+  const secondHalf = weightedAverage(values.slice(mid), wSecond);
+  const delta = pctChange(secondHalf, firstHalf);
+
+  if (rangeAvg == null) {
     kpiEl.innerHTML = `<span style="color:var(--brand-muted-2)">No data in range</span>`;
   } else {
     const dpart = delta == null
-      ? `<span style="color:var(--brand-muted-2); margin-left:8px;">no prior week</span>`
+      ? ""
       : `<span class="${delta > 0 ? "delta-up" : (delta < 0 ? "delta-down" : "")}" style="margin-left:8px;">${
             delta > 0 ? "▲" : (delta < 0 ? "▼" : "→")} ${Math.abs(delta).toFixed(1)}%</span>`;
-    kpiEl.innerHTML = `<span class="kpi-val">${metric.fmt(latestVal)}</span>${dpart}`;
+    kpiEl.innerHTML = `<span class="kpi-val">${metric.fmt(rangeAvg)}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">avg/week</span>${dpart}`;
   }
   metaEl.textContent = `${agg.periods.length} ${pluralize("weekly", agg.periods.length)} · ${agg.rawRowCount} keyword-rows`;
 
@@ -637,21 +653,19 @@ function renderSkuPanel(agg) {
   // Custom side-legend — fits many long SKU names without eating chart height.
   renderSideLegend(document.getElementById("imp-sku-legend"), chart);
 
-  // KPI: total impressions across selected SKUs in the most recent week with data.
-  let total = 0;
-  let kpiWeek = null;
-  for (let i = agg.weeks.length - 1; i >= 0; i--) {
-    const w = agg.weeks[i];
-    let weekTotal = 0;
-    let any = false;
+  // KPI: average per-week total across selected SKUs over the whole range
+  // (weight 1 per week — this is a sum-per-week metric).
+  const weekTotals = agg.weeks.map(w => {
+    let total = 0, any = false;
     for (const sku of LocalState.selectedSkus) {
       const v = agg.bySku.get(sku)?.get(w.week_num);
-      if (v != null) { weekTotal += v; any = true; }
+      if (v != null) { total += v; any = true; }
     }
-    if (any) { total = weekTotal; kpiWeek = w; break; }
-  }
-  kpiEl.innerHTML = kpiWeek
-    ? `<span class="kpi-val">${fmtInt(total)}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">selected SKUs · ${escapeHtml(kpiWeek.label)}</span>`
+    return any ? total : null;
+  });
+  const rangeAvg = weightedAverage(weekTotals);
+  kpiEl.innerHTML = rangeAvg != null
+    ? `<span class="kpi-val">${fmtInt(rangeAvg)}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">selected SKUs · avg/week</span>`
     : `<span style="color:var(--brand-muted-2)">No data in selected SKUs</span>`;
 
   // Table — one row per SKU, columns: SKU, totals per week + total in range.
@@ -690,6 +704,14 @@ function describeContext() {
     "Sub-categories": LocalState.subcategories,
     "Generated at": new Date().toISOString(),
   };
+}
+
+function downloadMetricImage(metricKey) {
+  const canvasId = metricKey === "sku" ? "imp-sku-canvas" : `imp-${metricKey}-canvas`;
+  const canvas = document.getElementById(canvasId);
+  const dataUrl = canvas && exportChartImage(canvas);
+  if (!dataUrl) { toast("Chart isn't ready to export yet."); return; }
+  downloadImage(`nat-habit_impressions-${metricKey}_${tsForFilename()}.png`, dataUrl);
 }
 
 function downloadMetric(metricKey, kind) {
