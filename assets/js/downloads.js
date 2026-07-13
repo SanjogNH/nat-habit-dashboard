@@ -101,6 +101,26 @@ export function filterContextSheet(label, contextPairs) {
 }
 
 /* ---------------------------------------------------------------- *
+ * Image (chart PNG export)
+ * ---------------------------------------------------------------- */
+
+/**
+ * Trigger a PNG download from a data URL (as produced by
+ * charts.js::exportChartImage). No blob/object-URL needed — data URLs can be
+ * assigned directly to an anchor's href.
+ * @param {string} filename   should end in .png
+ * @param {string} dataUrl
+ */
+export function downloadImage(filename, dataUrl) {
+  const a = document.createElement("a");
+  a.href = dataUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/* ---------------------------------------------------------------- *
  * Shared blob trigger
  * ---------------------------------------------------------------- */
 function triggerDownload(blob, filename) {
