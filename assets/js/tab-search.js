@@ -13,6 +13,7 @@
  */
 
 import { State, loadTab } from "./dashboard.js";
+import { createResetButton } from "./filters.js";
 import {
   createDateRange, createSegmented, createMultiSelect,
   renderChipsAcrossTab, renderFilterChips,
@@ -264,6 +265,25 @@ function buildFilters() {
   // Stash option lists so the metric toggle's onChange handler can swap them.
   LocalState._allPlatformOptions  = ALL_PLATFORM_OPTIONS;
   LocalState._rankPlatformOptions = RANK_PLATFORM_OPTIONS;
+
+  const resetBtn = createResetButton(
+    () => [dateF, viewF, platsF, brandedF, metricF, categoriesF],
+    () => {
+      LocalState.sort = { col: null, dir: "auto" };
+      // Categories are back to "all" at this point; rebuild the keyword
+      // pool (and select all of it) to match, then re-sync the platform
+      // list for the now-default view/metric mode.
+      keywordsF.setOptions(collectKeywordOptions(categoriesF.getSelected()));
+      keywordsF.setSelected(
+        collectKeywordOptions(categoriesF.getSelected()).map(o => o.value),
+        { silent: true }
+      );
+      applyMetricModeToPicker(false);
+      syncFromFilters();
+      rerender();
+    }
+  );
+  bar.appendChild(resetBtn);
 
   // Wire change events.
   LocalState.filters = { dateF, viewF, platsF, brandedF, metricF, categoriesF, keywordsF };
