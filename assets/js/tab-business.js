@@ -900,6 +900,7 @@ function rawRowsSheet(metricKey) {
   const cols = [
     { key: "platform", label: "Platform" }, { key: "date", label: "Date" },
     { key: "nh_sku", label: "NH SKU" },
+    { key: "short_code", label: "Short Code" },
     { key: "category", label: "Category" }, { key: "subcategory", label: "Sub-category" },
     { key: "glance_views", label: "Page Views" },
     { key: "gross_units",  label: "Units" },
@@ -913,7 +914,7 @@ function rawRowsSheet(metricKey) {
       (level === "category"    && dimSet.has(r.category))    ||
       (level === "subcategory" && dimSet.has(r.subcategory)) ||
       (level === "sku"         && dimSet.has(r.nh_sku))
-    )));
+    ))).map(r => ({ ...r, short_code: LocalState.skuLookup?.get(r.nh_sku) || "" }));
   return { name: "Filtered sales rows", columns: cols, rows };
 }
 
