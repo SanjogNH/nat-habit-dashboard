@@ -215,9 +215,15 @@ export function renderLineChart(canvas, opts) {
                   const sign = diff < 0 ? "↑" : (diff > 0 ? "↓" : "→");
                   deltaStr = `  ${sign}${Math.abs(diff)}`;
                 } else {
+                  // Absolute + percent delta vs the previous data point in
+                  // this same series — most useful on multi-series charts
+                  // (e.g. platform-vs-platform) where each line's own trend
+                  // needs to be read at a glance in the tooltip.
                   const pct = (diff / Math.abs(prev)) * 100;
                   const sign = pct > 0 ? "+" : "";
-                  deltaStr = `  (${sign}${pct.toFixed(1)}%)`;
+                  const arrow = diff > 0 ? "▲" : (diff < 0 ? "▼" : "→");
+                  const absStr = valueFn(Math.abs(diff));
+                  deltaStr = `  (${arrow} ${absStr} / ${sign}${pct.toFixed(1)}%)`;
                 }
               }
               return `${ctx.dataset.label}: ${valueStr}${deltaStr}`;
