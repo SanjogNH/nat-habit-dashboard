@@ -759,7 +759,21 @@ function renderColoredLineChart(canvas, { labels, series, yFormat, yTitle }) {
             label(ctx) {
               const v = ctx.parsed.y;
               if (v == null) return `${ctx.dataset.label}: —`;
-              return `${ctx.dataset.label}: ${valueFn(v)}`;
+              // Delta vs the previous data point in this same series — shown
+              // for every line so, e.g., Amazon and Flipkart's period-over-
+              // period movement can both be read straight from the tooltip.
+              const idx = ctx.dataIndex;
+              const arr = ctx.dataset.data;
+              const prev = idx > 0 ? arr[idx - 1] : null;
+              let deltaStr = "";
+              if (prev != null && prev !== 0) {
+                const diff = v - prev;
+                const pct = (diff / Math.abs(prev)) * 100;
+                const sign = pct > 0 ? "+" : "";
+                const arrow = diff > 0 ? "▲" : (diff < 0 ? "▼" : "→");
+                deltaStr = `  (${arrow} ${valueFn(Math.abs(diff))} / ${sign}${pct.toFixed(1)}%)`;
+              }
+              return `${ctx.dataset.label}: ${valueFn(v)}${deltaStr}`;
             },
           },
         },
