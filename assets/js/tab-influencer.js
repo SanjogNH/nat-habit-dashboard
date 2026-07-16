@@ -29,6 +29,7 @@ import { State, loadTab } from "./dashboard.js";
 import {
   createDateRange, createMultiSelect,
   renderChipsAcrossTab, buildDateChip, buildMultiSelectChip,
+  createResetButton,
 } from "./filters.js";
 import { renderLineChart, destroyChart, exportChartImage, PALETTE } from "./charts.js";
 import { downloadCSV, downloadXLSX, downloadImage, filterContextSheet } from "./downloads.js";
@@ -268,6 +269,12 @@ function buildFilters() {
   toggleBtn.textContent = "Show all tables";
   bar.appendChild(toggleBtn);
   wireTableToggleAll(toggleBtn, document.getElementById("content-influencer"));
+
+  const resetBtn = createResetButton(
+    () => [dateF, catsF, infF, adF],
+    () => { syncFromFilters(); rerender(); }
+  );
+  bar.appendChild(resetBtn);
 
   LocalState.filters = { dateF, catsF, infF, adF };
   syncFromFilters();
