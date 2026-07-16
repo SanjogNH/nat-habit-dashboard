@@ -121,6 +121,7 @@ export function renderLineChart(canvas, opts) {
     yTitle = "",
     hideLegend = false,
     horizontal = false,
+    selectableLegend = false,
   } = opts;
   // Default beginAtZero to !yReverse for backward compat. Callers that want
   // natural-scale (no-zero-floor) without reversing the axis pass it explicitly.
@@ -186,7 +187,7 @@ export function renderLineChart(canvas, opts) {
             font: { size: 12, weight: 600 },
             usePointStyle: true,
           },
-          onClick: Chart.defaults.plugins.legend.onClick,
+          onClick: selectableLegend ? isolateLegendOnClick : Chart.defaults.plugins.legend.onClick,
         },
         tooltip: {
           backgroundColor: "rgba(31,42,34,0.95)",
@@ -239,6 +240,37 @@ export function renderLineChart(canvas, opts) {
 /** Destroy any chart bound to a canvas, e.g., when switching tabs. */
 export function destroyChart(canvas) {
   _destroyExisting(canvas);
+}
+
+/**
+ * Legend click handler implementing an "isolate/select" model instead of
+ * Chart.js's default "toggle that one off, leave the rest alone" behavior.
+ *
+ *   - No items clicked (fresh chart)      → all series shown (unchanged).
+ *   - Click a series                      → only the clicked series are
+ *                                            shown; everything else hides.
+ *   - Click a second series               → both clicked series are shown
+ *                                            (additive — builds a set).
+ *   - Click every currently-shown series  → the "selected" set empties out
+ *                                            and the chart falls back to
+ *                                            showing all series again.
+ *
+ * State lives on the Chart instance itself (`chart._nhSelected`), so it's
+ * naturally reset whenever the chart is destroyed/recreated (e.g. on a
+ * filter change) rather than leaking across charts.
+ */
+export function isolateLegendOnClick(e, legendItem, legend) {
+  const chart = legend.chart;
+  const idx = legendItem.datasetIndex;
+  const sel = chart._nhSelected || (chart._nhSelected = new Set());
+  if (sel.has(idx)) sel.delete(idx);
+  else sel.add(idx);
+  const total = chart.data.datasets.length;
+  const showAll = sel.size === 0;
+  for (let i = 0; i < total; i++) {
+    chart.setDatasetVisibility(i, showAll || sel.has(i));
+  }
+  chart.update();
 }
 
 /**
