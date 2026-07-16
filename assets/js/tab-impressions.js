@@ -21,6 +21,7 @@ import { State } from "./dashboard.js";
 import {
   createDateRange, createMultiSelect, createSegmented,
   renderChipsAcrossTab, buildDateChip, buildMultiSelectChip, buildSegmentChip,
+  createResetButton,
 } from "./filters.js";
 import { renderLineChart, destroyChart, exportChartImage, renderSideLegend, PALETTE } from "./charts.js";
 import { downloadCSV, downloadXLSX, downloadImage, filterContextSheet } from "./downloads.js";
@@ -252,6 +253,18 @@ function buildFilters() {
   toggleBtn.textContent = "Show all tables";
   bar.appendChild(toggleBtn);
   wireTableToggleAll(toggleBtn, document.getElementById("content-impressions"));
+
+  const resetBtn = createResetButton(
+    () => [dateF, platsF, brandedF, catsF],
+    () => {
+      const newSubOpts = collectSubcategoryOptions(catsF.getSelected());
+      subF.setOptions(newSubOpts);
+      subF.setSelected(newSubOpts.map(o => o.value), { silent: true });
+      syncFromFilters();
+      rerender();
+    }
+  );
+  bar.appendChild(resetBtn);
 
   LocalState.filters = { dateF, platsF, brandedF, catsF, subF };
 
