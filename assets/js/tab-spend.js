@@ -18,8 +18,9 @@ import { State } from "./dashboard.js";
 import {
   createDateRange, createSegmented, createMultiSelect,
   renderChipsAcrossTab, buildDateChip, buildMultiSelectChip, buildSegmentChip,
+  createResetButton, createChartViewToggle,
 } from "./filters.js";
-import { renderLineChart, destroyChart, exportChartImage, PALETTE } from "./charts.js";
+import { renderLineChart, destroyChart, exportChartImage, isolateLegendOnClick, PALETTE } from "./charts.js";
 import { downloadCSV, downloadXLSX, downloadImage, filterContextSheet } from "./downloads.js";
 import { escapeHtml, fmtINR, fmtROAS, pctChange, toast , makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
 import {
@@ -78,9 +79,13 @@ const LocalState = {
   dims: new Set(),    // multi-select dim values; empty set ↔ "all"
   filters: null,
   _agg: null,
+  // Per-metric chart view mode: 'total' (platforms summed into one line,
+  // default) or 'individual' (one line per selected platform).
+  viewMode: { spend: "total", sales: "total", roas: "total" },
 };
 
 let _built = false;
+let _viewToggles = {};   // metric key -> createChartViewToggle() instance
 
 /** Reset module state (called by Live Refresh to force a rebuild). */
 export function reset() {
@@ -112,6 +117,7 @@ function buildSkeleton(root) {
           <span class="section-meta" id="spd-${m.key}-kpi"></span>
         </h2>
         <div class="section-actions">
+          <span id="spd-${m.key}-viewtoggle-slot"></span>
           <span class="section-meta" id="spd-${m.key}-meta"></span>
           <button class="icon-btn" data-dl="csv" data-metric="${m.key}">CSV</button>
           <button class="icon-btn" data-dl="xlsx" data-metric="${m.key}">Excel</button>
@@ -137,6 +143,27 @@ function buildSkeleton(root) {
 
   // Collapse all per-period breakdown tables by default.
   root.querySelectorAll(".section-card > .tbl-wrap").forEach(el => makeTableCollapsible(el));
+
+  // Total / Individual view toggle, one per metric card. Default: Total
+  // (matches current behavior — platforms summed into Branded/Generic/
+  // Other/Total lines). Individual breaks the same metric out into one
+  // line per selected platform instead.
+  _viewToggles = {};
+  for (const m of METRICS) {
+    const slot = document.getElementById(`spd-${m.key}-viewtoggle-slot`);
+    if (!slot) continue;
+    const t = createChartViewToggle({
+      id: `spend.viewmode.${m.key}`,
+      defaultValue: "total",
+      onChange: (v) => {
+        LocalState.viewMode[m.key] = v;
+        renderMetricPanel(m, LocalState._agg);
+      },
+    });
+    LocalState.viewMode[m.key] = t.getValue();
+    slot.appendChild(t.el);
+    _viewToggles[m.key] = t;
+  }
 }
 
 function downloadMetricImage(metricKey) {
@@ -218,6 +245,22 @@ function buildFilters() {
   toggleBtn.textContent = "Show all tables";
   bar.appendChild(toggleBtn);
   wireTableToggleAll(toggleBtn, document.getElementById("content-spend"));
+
+  const resetBtn = createResetButton(
+    () => [dateF, granF, platsF, levelF],
+    () => {
+      // Level reset (via setValue above) already clears dims/rebuilds the
+      // dimension picker through levelF's own onChange handler. Also put
+      // every chart's Total/Individual toggle back to Total.
+      for (const key of Object.keys(_viewToggles)) {
+        _viewToggles[key].setValue("total");
+        LocalState.viewMode[key] = "total";
+      }
+      syncFromFilters();
+      rerender();
+    }
+  );
+  bar.appendChild(resetBtn);
 
   LocalState.filters = { dateF, granF, platsF, levelF };
   // LocalState.dims is a Set of selected dimension values.  Empty Set = "all".
@@ -461,6 +504,56 @@ function _emptyPeriod(p) {
   };
 }
 
+/**
+ * Individual view mode: same date/dim filters as computeAggregations, but
+ * grouped per platform (branches summed together) instead of per branch.
+ * Used when a chart's Total/Individual toggle is set to "Individual".
+ */
+function computePlatformAggregations() {
+  const { range, gran, platforms, level } = LocalState;
+  const platSet = new Set(platforms);
+
+  const allDims = new Set(availableDimensions().map(d => d.value));
+  const useAll = LocalState.dims.size === 0 || LocalState.dims.size === allDims.size;
+  const dimSet = useAll ? null : LocalState.dims;
+
+  const rows = (State.data.bcg_spend || []).filter(r => {
+    if (!platSet.has(r.platform)) return false;
+    if (range.from && r.date < range.from) return false;
+    if (range.to   && r.date > range.to)   return false;
+    if (dimSet) {
+      if (level === "category"    && !dimSet.has(r.category))          return false;
+      if (level === "subcategory" && !dimSet.has(r.subcategory))       return false;
+      if (level === "channel"     && !dimSet.has(r.marketing_channel)) return false;
+    }
+    return true;
+  });
+
+  const platformList = [...platSet].sort();
+  const periodList = enumeratePeriods(range.from, range.to, gran);
+  const periodMap = new Map(periodList.map(p => {
+    const byPlatform = new Map(platformList.map(pl => [pl, { spend: null, sales: null, roas: null, hasData: false }]));
+    return [p.key, { key: p.key, label: p.label, byPlatform }];
+  }));
+
+  for (const r of rows) {
+    const e = periodMap.get(bucketKey(r.date, gran));
+    if (!e) continue;
+    const b = e.byPlatform.get(r.platform);
+    if (!b) continue;
+    if (!b.hasData) { b.spend = 0; b.sales = 0; b.hasData = true; }
+    b.spend += +r.spend || 0;
+    b.sales += +r.sales || 0;
+  }
+  for (const e of periodMap.values()) {
+    for (const b of e.byPlatform.values()) {
+      b.roas = (b.hasData && b.spend > 0) ? b.sales / b.spend : null;
+    }
+  }
+
+  return { periods: periodList.map(p => periodMap.get(p.key)), platforms: platformList };
+}
+
 /* ---------------------------------------------------------------- *
  * Per-metric panel
  * ---------------------------------------------------------------- */
@@ -470,6 +563,13 @@ function renderMetricPanel(metric, agg) {
   const tbody  = document.querySelector(`#spd-${metric.key}-tbl tbody`);
   const kpiEl  = document.getElementById(`spd-${metric.key}-kpi`);
   const metaEl = document.getElementById(`spd-${metric.key}-meta`);
+
+  const isIndividual = LocalState.viewMode[metric.key] === "individual";
+
+  if (isIndividual) {
+    renderIndividualMetricPanel(metric, canvas, thead, tbody, kpiEl, metaEl);
+    return;
+  }
 
   const labels = agg.periods.map(p => p.label);
 
@@ -545,6 +645,47 @@ function renderMetricPanel(metric, agg) {
   tbody.innerHTML = rowsHTML.join("") || `<tr><td colspan="7" class="empty-state">No periods in range.</td></tr>`;
 }
 
+/**
+ * Individual view: one line per selected platform (branches summed
+ * together), plus a matching per-platform, per-period table.
+ */
+function renderIndividualMetricPanel(metric, canvas, thead, tbody, kpiEl, metaEl) {
+  const pagg = computePlatformAggregations();
+  LocalState._paggByMetric = LocalState._paggByMetric || {};
+  LocalState._paggByMetric[metric.key] = pagg;
+
+  const labels = pagg.periods.map(p => p.label);
+  const series = pagg.platforms.map((pl, i) => ({
+    label: pl,
+    color: PALETTE[i % PALETTE.length],
+    data: pagg.periods.map(p => metric.pick(p.byPlatform.get(pl))),
+  }));
+
+  renderColoredLineChart(canvas, { labels, series, yFormat: metric.yFormat, yTitle: metric.yTitle });
+
+  if (!pagg.platforms.length) {
+    kpiEl.innerHTML = `<span style="color:var(--brand-muted-2)">No platforms selected</span>`;
+  } else {
+    kpiEl.innerHTML = `<span class="kpi-val">${pagg.platforms.length}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">platform${pagg.platforms.length === 1 ? "" : "s"} shown individually</span>`;
+  }
+  metaEl.textContent = `${pagg.periods.length} ${pluralize(LocalState.gran, pagg.periods.length)}`;
+
+  thead.innerHTML = `<tr><th>Period</th>${pagg.platforms.map(pl => `<th class="num">${escapeHtml(pl)}</th>`).join("")}</tr>`;
+  const rowsHTML = [];
+  for (let i = pagg.periods.length - 1; i >= 0; i--) {
+    const p = pagg.periods[i];
+    let row = `<tr><td><strong>${escapeHtml(p.label)}</strong></td>`;
+    for (const pl of pagg.platforms) {
+      const v = metric.pick(p.byPlatform.get(pl));
+      row += `<td class="num mono">${v == null ? "—" : metric.fmt(v)}</td>`;
+    }
+    row += `</tr>`;
+    rowsHTML.push(row);
+  }
+  tbody.innerHTML = rowsHTML.join("") ||
+    `<tr><td colspan="${pagg.platforms.length + 1}" class="empty-state">No periods in range.</td></tr>`;
+}
+
 /* ---------------------------------------------------------------- *
  * Custom multi-color line chart (branches need fixed colors)
  *
@@ -605,6 +746,9 @@ function renderColoredLineChart(canvas, { labels, series, yFormat, yTitle }) {
           position: "top", align: "end",
           labels: { boxWidth: 8, boxHeight: 8, padding: 14,
                     font: { size: 12, weight: 600 }, usePointStyle: true },
+          // Isolate-select behavior: clicked series are the ones shown,
+          // rather than Chart.js's default "click hides just that one".
+          onClick: isolateLegendOnClick,
         },
         tooltip: {
           backgroundColor: "rgba(31,42,34,0.95)",
