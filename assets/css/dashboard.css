@@ -1115,6 +1115,57 @@ a:hover { text-decoration: underline; }
   .fl-tbl-toggle { min-height: 44px; align-self: stretch; margin-left: 0; }
 }
 
+/* Reset-tab button — sits right after "Show all tables". Distinguished
+   with the terracotta accent so it reads as a deliberate action, not just
+   another display toggle. */
+.fl-reset-btn {
+  margin-left: 8px;
+  border-color: var(--brand-primary);
+  color: var(--brand-primary);
+}
+.fl-reset-btn:hover {
+  background: var(--brand-primary);
+  color: #fff;
+}
+@media (max-width: 768px) {
+  .fl-reset-btn { margin-left: 0; }
+}
+
+/* Per-chart Total / Individual view toggle — compact segmented control
+   living in a chart card's header, next to the CSV/Excel/Image buttons. */
+.chart-view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--brand-border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  margin-right: 4px;
+}
+.chart-view-toggle button {
+  padding: 5px 10px;
+  background: transparent;
+  border: none;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--brand-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+.chart-view-toggle button + button {
+  border-left: 1px solid var(--brand-border);
+}
+.chart-view-toggle button.is-active {
+  background: var(--brand-primary);
+  color: #fff;
+}
+.chart-view-toggle button:not(.is-active):hover {
+  background: var(--brand-accent);
+  color: var(--brand-deep);
+}
+@media (max-width: 768px) {
+  .chart-view-toggle button { min-height: 36px; padding: 6px 10px; }
+}
+
 /* ==========================================================================
    Custom side-legend (used by SKU Impressions and Keyword Trend charts
    where default top legend overflows with long labels)
