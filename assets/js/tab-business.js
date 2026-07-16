@@ -16,8 +16,9 @@ import { State, loadTab } from "./dashboard.js";
 import {
   createDateRange, createSegmented, createMultiSelect,
   renderChipsAcrossTab, buildDateChip, buildMultiSelectChip, buildSegmentChip,
+  createResetButton, createChartViewToggle,
 } from "./filters.js";
-import { renderLineChart, destroyChart, exportChartImage, PALETTE } from "./charts.js";
+import { renderLineChart, destroyChart, exportChartImage, isolateLegendOnClick, PALETTE } from "./charts.js";
 import { downloadCSV, downloadXLSX, downloadImage, filterContextSheet } from "./downloads.js";
 import { escapeHtml, fmtInt, fmtINR, fmtDelta, pctChange, toast , makeTableCollapsible, syncTableCollapseLabels, wireTableToggleAll } from "./util.js";
 import {
@@ -53,9 +54,13 @@ const LocalState = {
   salesRows: null,        // populated on first lazy-load
   skuLookup: null,        // Map<nh_sku, short_code>
   _agg: null,
+  // Per-metric chart view mode: 'total' (platforms summed into one line,
+  // default) or 'individual' (one line per selected platform).
+  viewMode: { page_views: "total", units: "total", revenue: "total", spend: "total" },
 };
 
 let _built = false;
+let _viewToggles = {};   // metric key -> createChartViewToggle() instance
 
 /** Reset module state (called by Live Refresh to force a rebuild). */
 export function reset() {
@@ -102,6 +107,7 @@ function buildSkeleton(root) {
           <span class="section-meta" id="bus-${m.key}-kpi"></span>
         </h2>
         <div class="section-actions">
+          <span id="bus-${m.key}-viewtoggle-slot"></span>
           <span class="section-meta" id="bus-${m.key}-meta"></span>
           <button class="icon-btn" data-dl="csv" data-metric="${m.key}">CSV</button>
           <button class="icon-btn" data-dl="xlsx" data-metric="${m.key}">Excel</button>
@@ -169,6 +175,26 @@ function buildSkeleton(root) {
 
   // Collapse all time-series breakdown tables by default (each section card has one).
   root.querySelectorAll(".section-card > .tbl-wrap").forEach(el => makeTableCollapsible(el));
+
+  // Total / Individual view toggle, one per metric card. Default: Total
+  // (platforms summed, matching current behavior). Individual breaks the
+  // metric out into one line per selected platform instead.
+  _viewToggles = {};
+  for (const m of METRICS) {
+    const slot = document.getElementById(`bus-${m.key}-viewtoggle-slot`);
+    if (!slot) continue;
+    const t = createChartViewToggle({
+      id: `business.viewmode.${m.key}`,
+      defaultValue: "total",
+      onChange: (v) => {
+        LocalState.viewMode[m.key] = v;
+        renderMetricPanel(m, LocalState._agg);
+      },
+    });
+    LocalState.viewMode[m.key] = t.getValue();
+    slot.appendChild(t.el);
+    _viewToggles[m.key] = t;
+  }
 
   buildCustomBuilderFilters();
 }
@@ -241,6 +267,19 @@ function buildFilters() {
   toggleBtn.textContent = "Show all tables";
   bar.appendChild(toggleBtn);
   wireTableToggleAll(toggleBtn, document.getElementById("content-business"));
+
+  const resetBtn = createResetButton(
+    () => [dateF, granF, platsF, levelF],
+    () => {
+      for (const key of Object.keys(_viewToggles)) {
+        _viewToggles[key].setValue("total");
+        LocalState.viewMode[key] = "total";
+      }
+      syncFromFilters();
+      rerender();
+    }
+  );
+  bar.appendChild(resetBtn);
 
   LocalState.filters = { dateF, granF, platsF, levelF };
 
@@ -523,6 +562,81 @@ function computeAggregations() {
   return { periods, spendAvailable, totals };
 }
 
+/**
+ * Individual view mode: same date/dim filters as computeAggregations, but
+ * grouped per platform instead of summed across all selected platforms.
+ * Used when a metric card's Total/Individual toggle is set to "Individual".
+ */
+function computePlatformAggregations() {
+  const { range, gran, platforms, level } = LocalState;
+  const platSet = new Set(platforms);
+  const spendAvailable = (level !== "sku");
+
+  const allDims = new Set(availableDimensions().map(d => d.value));
+  const useAll = LocalState.dims.size === 0 || LocalState.dims.size === allDims.size;
+  const dimSet = useAll ? null : LocalState.dims;
+
+  const matchesDim = (r) => {
+    if (!dimSet) return true;
+    if (level === "category")    return dimSet.has(r.category);
+    if (level === "subcategory") return dimSet.has(r.subcategory);
+    if (level === "sku")         return dimSet.has(r.nh_sku);
+    return true;
+  };
+
+  const sales = (LocalState.salesRows || []).filter(r =>
+    platSet.has(r.platform) &&
+    (!range.from || r.date >= range.from) &&
+    (!range.to   || r.date <= range.to) &&
+    matchesDim(r));
+
+  const spendRows = spendAvailable ? (State.data.bcg_spend || []).filter(r => {
+    if (!platSet.has(r.platform)) return false;
+    if (range.from && r.date < range.from) return false;
+    if (range.to   && r.date > range.to)   return false;
+    if (dimSet) {
+      if (level === "category"    && !dimSet.has(r.category))    return false;
+      if (level === "subcategory" && !dimSet.has(r.subcategory)) return false;
+    }
+    return true;
+  }) : [];
+
+  const platformList = [...platSet].sort();
+  const periodList = enumeratePeriods(range.from, range.to, gran);
+  const periodMap = new Map(periodList.map(p => {
+    const byPlatform = new Map(platformList.map(pl => [pl, {
+      page_views: null, units: null, revenue: null, spend: null,
+      hasSales: false, hasSpend: false,
+    }]));
+    return [p.key, { key: p.key, label: p.label, byPlatform }];
+  }));
+
+  for (const r of sales) {
+    const e = periodMap.get(bucketKey(r.date, gran));
+    if (!e) continue;
+    const b = e.byPlatform.get(r.platform);
+    if (!b) continue;
+    if (!b.hasSales) { b.page_views = 0; b.units = 0; b.revenue = 0; b.hasSales = true; }
+    b.page_views += +r.glance_views || 0;
+    b.units      += +r.gross_units  || 0;
+    b.revenue    += +r.revenue      || 0;
+  }
+  for (const r of spendRows) {
+    const e = periodMap.get(bucketKey(r.date, gran));
+    if (!e) continue;
+    const b = e.byPlatform.get(r.platform);
+    if (!b) continue;
+    if (!b.hasSpend) { b.spend = 0; b.hasSpend = true; }
+    b.spend += +r.spend || 0;
+  }
+
+  return {
+    periods: periodList.map(p => periodMap.get(p.key)),
+    platforms: platformList,
+    spendAvailable,
+  };
+}
+
 /* ---------------------------------------------------------------- *
  * Per-metric panel render
  * ---------------------------------------------------------------- */
@@ -555,6 +669,12 @@ function renderMetricPanel(metric, agg) {
     section.querySelector(".tbl-wrap").style.display = "";
     empty.hidden = true;
     section.querySelectorAll('[data-dl]').forEach(b => b.disabled = false);
+  }
+
+  const isIndividual = LocalState.viewMode[metric.key] === "individual";
+  if (isIndividual) {
+    renderIndividualMetricPanel(metric, canvas, thead, tbody, kpiEl, metaEl);
+    return;
   }
 
   const periods = agg.periods;
@@ -613,6 +733,55 @@ function renderMetricPanel(metric, agg) {
     rowsHTML.push(`<tr><td><strong>${escapeHtml(p.label)}</strong></td><td class="num mono">${vCell}</td><td class="num">${dCell}</td></tr>`);
   }
   tbody.innerHTML = rowsHTML.join("") || `<tr><td colspan="3" class="empty-state">No periods in range.</td></tr>`;
+}
+
+/**
+ * Individual view: one line per selected platform, plus a matching
+ * per-platform, per-period table. Reuses computePlatformAggregations.
+ */
+function renderIndividualMetricPanel(metric, canvas, thead, tbody, kpiEl, metaEl) {
+  const pagg = computePlatformAggregations();
+  LocalState._paggByMetric = LocalState._paggByMetric || {};
+  LocalState._paggByMetric[metric.key] = pagg;
+
+  const pick = (b) => {
+    if (metric.key === "spend") return b.hasSpend ? b.spend : null;
+    return b.hasSales ? b[metric.key] : null;
+  };
+
+  const labels = pagg.periods.map(p => p.label);
+  const series = pagg.platforms.map(pl => ({
+    label: pl,
+    data: pagg.periods.map(p => pick(p.byPlatform.get(pl))),
+  }));
+
+  renderLineChart(canvas, {
+    labels, series,
+    yFormat: metric.yFormat, yTitle: metric.yTitle,
+    selectableLegend: true,
+  });
+
+  if (!pagg.platforms.length) {
+    kpiEl.innerHTML = `<span style="color:var(--brand-muted-2)">No platforms selected</span>`;
+  } else {
+    kpiEl.innerHTML = `<span class="kpi-val">${pagg.platforms.length}</span> <span style="color:var(--brand-muted); font-size:var(--fs-sm); margin-left:4px;">platform${pagg.platforms.length === 1 ? "" : "s"} shown individually</span>`;
+  }
+  metaEl.textContent = `${pagg.periods.length} ${pluralize(LocalState.gran, pagg.periods.length)}`;
+
+  thead.innerHTML = `<tr><th>Period</th>${pagg.platforms.map(pl => `<th class="num">${escapeHtml(pl)}</th>`).join("")}</tr>`;
+  const rowsHTML = [];
+  for (let i = pagg.periods.length - 1; i >= 0; i--) {
+    const p = pagg.periods[i];
+    let row = `<tr><td><strong>${escapeHtml(p.label)}</strong></td>`;
+    for (const pl of pagg.platforms) {
+      const v = pick(p.byPlatform.get(pl));
+      row += `<td class="num mono">${v == null ? "—" : metric.fmt(v)}</td>`;
+    }
+    row += `</tr>`;
+    rowsHTML.push(row);
+  }
+  tbody.innerHTML = rowsHTML.join("") ||
+    `<tr><td colspan="${pagg.platforms.length + 1}" class="empty-state">No periods in range.</td></tr>`;
 }
 
 function ts() { return tsForFilename(); }
