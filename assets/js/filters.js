@@ -97,17 +97,19 @@ export function createDateRange(opts) {
      * to reset the range back to the full data bounds. Clamps both ends to
      * the data min/max, then fires onChange handlers.
      */
-    setRange(next) {
+    setRange(next, opts = {}) {
       const f = clampDate(next?.from || fallback.from, minDate, maxDate);
       const t = clampDate(next?.to   || fallback.to,   minDate, maxDate);
       from = f; to = t;
       el.querySelector('[data-which="from"]').value = from;
       el.querySelector('[data-which="to"]').value   = to;
       Persist.set(id, { from, to });
-      handlers.forEach(fn => fn({ from, to }));
+      if (!opts.silent) handlers.forEach(fn => fn({ from, to }));
     },
     /** Return the full data bounds — used by chip handlers as the "all" target. */
     getBounds() { return { from: minDate || from, to: maxDate || to }; },
+    /** Return this widget's original default range (e.g. "last 90 days"). */
+    getDefault() { return { from: fallback.from, to: fallback.to }; },
     onChange(fn) { handlers.push(fn); },
   };
 }
@@ -165,7 +167,9 @@ export function createSegmented(opts) {
   return {
     el,
     getValue() { return value; },
-    setValue(v) {
+    /** This widget's original default value (used by chip-clear / Reset). */
+    getDefault() { return defaultValue; },
+    setValue(v, opts = {}) {
       if (!options.find(o => o.value === v)) return;
       value = v;
       el.querySelectorAll("button").forEach(b => {
@@ -174,6 +178,10 @@ export function createSegmented(opts) {
         b.setAttribute("aria-selected", on ? "true" : "false");
       });
       Persist.set(id, value);
+      // Fire onChange by default so programmatic resets (chip-clear, the
+      // tab Reset button) actually propagate to a rerender, same as a real
+      // click would. Pass { silent: true } to skip this (rare).
+      if (!opts.silent) handlers.forEach(fn => fn(value));
     },
     onChange(fn) { handlers.push(fn); },
   };
@@ -422,11 +430,20 @@ export function createMultiSelect(opts) {
   return {
     el,
     getSelected() { return [...selected]; },
-    setSelected(arr) {
+    /** This widget's original default selection (used by chip-clear / Reset). */
+    getDefault() { return initial.slice(); },
+    setSelected(arr, opts = {}) {
       selected = new Set(arr.filter(v => allValues.includes(v)));
       Persist.set(id, [...selected]);
       updateLabel();
       if (!pop.hidden) renderPop();
+      // Fire onChange by default so programmatic resets (chip-clear, the tab
+      // Reset button) actually propagate to a rerender, matching what a real
+      // checkbox click does. Previously this was silent, which meant clicking
+      // a chip's "×" updated the widget's label but never re-ran the
+      // underlying aggregation — pass { silent: true } to keep the old
+      // no-rerender behavior where that's still wanted.
+      if (!opts.silent) handlers.forEach(fn => fn([...selected]));
     },
     /**
      * Swap the option list at runtime. Any currently-selected items that
@@ -455,6 +472,91 @@ export function createMultiSelect(opts) {
     },
     onChange(fn) { handlers.push(fn); },
     refresh() { updateLabel(); if (!pop.hidden) renderPop(); },
+  };
+}
+
+/* ---------------------------------------------------------------- *
+ * Reset-tab button
+ *
+ * Sits in the filter bar next to "Show all tables". Clicking it restores
+ * every filter passed in to its original default value/selection/range —
+ * not just "clear the narrowing" one field at a time like the chip ×
+ * buttons — and calls onDone() once everything has been reset so the tab
+ * can do one final rerender.
+ *
+ * `resettables` is an array of filter-widget instances (whatever
+ * createDateRange / createSegmented / createMultiSelect returned). Each is
+ * restored via its own getDefault()/setRange|setValue|setSelected() pair,
+ * detected by which methods it exposes.
+ * ---------------------------------------------------------------- */
+export function createResetButton(getResettables, onDone) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "fl-tbl-toggle fl-reset-btn";
+  btn.textContent = "Reset";
+  btn.title = "Clear all filters on this tab back to defaults";
+  btn.addEventListener("click", () => {
+    const resettables = getResettables() || [];
+    for (const w of resettables) {
+      if (!w) continue;
+      // Each call is silent — we don't want N intermediate rerenders, just
+      // one at the end via onDone().
+      if (w.setRange && w.getDefault)     w.setRange(w.getDefault(), { silent: true });
+      else if (w.setSelected && w.getDefault) w.setSelected(w.getDefault(), { silent: true });
+      else if (w.setValue && w.getDefault)    w.setValue(w.getDefault(), { silent: true });
+    }
+    onDone?.();
+  });
+  return btn;
+}
+
+/* ---------------------------------------------------------------- *
+ * Per-chart Total / Individual view toggle
+ *
+ * A small inline segmented control meant to sit in a chart's section
+ * header (next to the CSV/Excel/Image buttons), letting the user switch a
+ * multi-platform chart between:
+ *   - "Total"      (default) — selected platforms summed into one line.
+ *   - "Individual" — one line per selected platform.
+ * ---------------------------------------------------------------- */
+export function createChartViewToggle({ id, defaultValue = "total", onChange }) {
+  let value = Persist.get(id, defaultValue) || defaultValue;
+  const el = document.createElement("div");
+  el.className = "chart-view-toggle";
+  el.setAttribute("role", "tablist");
+  el.setAttribute("aria-label", "Chart view");
+  el.innerHTML = `
+    <button type="button" role="tab" data-v="total" class="${value === "total" ? "is-active" : ""}"
+            aria-selected="${value === "total" ? "true" : "false"}">Total</button>
+    <button type="button" role="tab" data-v="individual" class="${value === "individual" ? "is-active" : ""}"
+            aria-selected="${value === "individual" ? "true" : "false"}">Individual</button>
+  `;
+  el.querySelectorAll("button").forEach(b => {
+    b.addEventListener("click", () => {
+      if (b.dataset.v === value) return;
+      value = b.dataset.v;
+      el.querySelectorAll("button").forEach(x => {
+        const on = x.dataset.v === value;
+        x.classList.toggle("is-active", on);
+        x.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      Persist.set(id, value);
+      onChange?.(value);
+    });
+  });
+  return {
+    el,
+    getValue() { return value; },
+    setValue(v) {
+      if (v !== "total" && v !== "individual") return;
+      value = v;
+      el.querySelectorAll("button").forEach(x => {
+        const on = x.dataset.v === value;
+        x.classList.toggle("is-active", on);
+        x.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      Persist.set(id, value);
+    },
   };
 }
 
