@@ -23,7 +23,7 @@ GVIZ_URL = (
     "https://docs.google.com/spreadsheets/d/{sid}/gviz/tq"
     "?tqx=out:csv&sheet={tab}"
 )
-REQUEST_TIMEOUT = 60  # seconds
+REQUEST_TIMEOUT = 120  # seconds
 
 
 def _fetch_one_gviz(sheet_id: str, tab_name: str) -> pd.DataFrame:
